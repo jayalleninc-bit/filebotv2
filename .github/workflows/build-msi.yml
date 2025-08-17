@@ -1,4 +1,4 @@
-name: Build MiniFileBot MSI (self-contained, fixed WXS)
+name: Build MiniFileBot MSI (self-contained, final)
 
 on:
   push:
@@ -224,6 +224,7 @@ jobs:
                 apply_action(src,dst,self.s.action,self.s.dry_run)
           EOF
 
+          # GUI
           cat > MiniFileBot/app_gui.py <<'EOF'
           from PySide6.QtWidgets import *
           from PySide6.QtCore import Qt
@@ -274,7 +275,7 @@ jobs:
             app=QApplication(sys.argv); w=App(); w.resize(1200,700); w.show(); sys.exit(app.exec())
           EOF
 
-          # WiX (fixed - removed RegistryValue that caused ICE03)
+          # WiX (explicit GUID + proper registry key as KeyPath)
           cat > installer/MiniFileBot.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -296,17 +297,18 @@ jobs:
                 <Directory Id="ProgramMenuFolder" />
               </Directory>
               <DirectoryRef Id="ProgramMenuFolder">
-                <Component Id="ApplicationShortcut" Guid="*">
+                <Component Id="ApplicationShortcut" Guid="{8F2C2F9D-2F3A-4B1E-A3B4-9D3E3C6F9B12}">
                   <Shortcut Id="ApplicationStartMenuShortcut" Name="MiniFileBot" Target="[INSTALLFOLDER]MiniFileBot.exe" WorkingDirectory="INSTALLFOLDER" />
                   <RemoveFolder Id="RemoveShortcutFolder" Directory="ProgramMenuFolder" On="uninstall" />
+                  <RegistryValue Root="HKCU" Key="Software\MiniFileBot" Name="StartMenu" Type="string" Value="1" KeyPath="yes" />
                 </Component>
               </DirectoryRef>
               <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
                 <Component Id="ExeComponent" Guid="*">
-                  <File Id="MiniFileBotExe" Source="$(var.BuildOutput)\\MiniFileBot.exe" KeyPath="yes" />
+                  <File Id="MiniFileBotExe" Source="$(var.BuildOutput)\MiniFileBot.exe" KeyPath="yes" />
                 </Component>
                 <Component Id="ConfigComponent" Guid="*">
-                  <File Id="ConfigYaml" Source ="$(var.BuildOutput)\\config.yaml" />
+                  <File Id="ConfigYaml" Source ="$(var.BuildOutput)\config.yaml" />
                 </Component>
               </ComponentGroup>
             </Product>
@@ -331,10 +333,7 @@ jobs:
             --name MiniFileBot ^
             --collect-all PySide6 ^
             --collect-submodules guessit
-          if not exist dist\MiniFileBot.exe (
-            echo [ERROR] PyInstaller did not produce dist\MiniFileBot.exe
-            exit /b 1
-          )
+          if not exist dist\MiniFileBot.exe exit /b 1
           copy config.yaml dist\config.yaml
 
       - name: Install WiX Toolset
@@ -357,7 +356,6 @@ jobs:
           if errorlevel 1 exit /b 1
           light.exe MiniFileBot.wixobj -ext WixUIExtension -o ..\dist\MiniFileBot-Installer.msi
           if errorlevel 1 exit /b 1
-          if not exist ..\dist\MiniFileBot-Installer.msi exit /b 1
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -366,5 +364,6 @@ jobs:
           path: |
             dist/**
             MiniFileBot/dist/**
+
 
 
