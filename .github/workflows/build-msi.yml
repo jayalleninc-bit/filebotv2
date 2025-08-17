@@ -1,4 +1,4 @@
-name: Build MiniFileBot MSI (self-contained)
+name: Build MiniFileBot MSI (self-contained, debug)
 
 on:
   push:
@@ -11,11 +11,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1) Bootstrap all project files using bash (avoids YAML quoting issues)
+      - name: Show runner basics (debug)
+        shell: bash
+        run: |
+          echo "OS:"; uname -a || ver
+          echo "Disk:"; df -h || true
+          echo "Chocolatey:"; choco --version || true
+
+      # 1) Bootstrap all project files (bash to avoid YAML quoting issues)
       - name: Bootstrap project files
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p MiniFileBot/engine/providers installer dist
 
           cat > MiniFileBot/requirements.txt <<'EOF'
@@ -328,14 +335,33 @@ jobs:
         shell: cmd
         working-directory: MiniFileBot
         run: |
+          dir
           pyinstaller --noconfirm --clean --windowed --onefile app_gui.py ^
             --name MiniFileBot ^
             --collect-all PySide6 ^
             --collect-submodules guessit
+          if not exist dist\MiniFileBot.exe (
+            echo [ERROR] PyInstaller did not produce dist\MiniFileBot.exe
+            exit /b 1
+          )
           copy config.yaml dist\config.yaml
 
-      - name: Install WiX Toolset
-        run: choco install wixtoolset --yes
+      - name: Install WiX Toolset (for MSI)
+        run: choco install wixtoolset --yes --no-progress
+
+      - name: Ensure WiX is on PATH
+        shell: pwsh
+        run: |
+          $wix = Get-ChildItem "C:\Program Files (x86)\WiX Toolset *\bin" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $wix) { Write-Error "WiX bin folder not found."; exit 1 }
+          echo "Using WiX at: $($wix.FullName)"
+          echo "$($wix.FullName)" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Verify WiX tools (debug)
+        shell: cmd
+        run: |
+          where candle.exe
+          where light.exe
 
       - name: Build MSI (WiX)
         shell: cmd
@@ -343,12 +369,32 @@ jobs:
         run: |
           if not exist ..\dist mkdir ..\dist
           set BUILDOUT=%CD%\..\MiniFileBot\dist
+          echo BUILDOUT=%BUILDOUT%
+          if not exist "%BUILDOUT%\MiniFileBot.exe" (
+            echo [ERROR] Missing EXE at %BUILDOUT%\MiniFileBot.exe
+            exit /b 1
+          )
           candle.exe -dBuildOutput="%BUILDOUT%" MiniFileBot.wxs -o MiniFileBot.wixobj
+          if errorlevel 1 exit /b 1
           light.exe MiniFileBot.wixobj -ext WixUIExtension -o ..\dist\MiniFileBot-Installer.msi
+          if errorlevel 1 exit /b 1
+          if not exist ..\dist\MiniFileBot-Installer.msi (
+            echo [ERROR] MSI not created.
+            exit /b 1
+          )
+          echo MSI ready.
+
+      - name: List dist (debug)
+        shell: bash
+        run: |
+          echo "Root dist:"; ls -al dist || true
+          echo "App dist:"; ls -al MiniFileBot/dist || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MiniFileBot-MSI
-          path: dist/
+          path: |
+            dist/**
+            MiniFileBot/dist/**
 
