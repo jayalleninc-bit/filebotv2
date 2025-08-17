@@ -1,4 +1,4 @@
-name: Build MiniFileBot MSI (self-contained, final)
+name: Build MiniFileBot MSI (self-contained, autoscan)
 
 on:
   push:
@@ -224,7 +224,7 @@ jobs:
                 apply_action(src,dst,self.s.action,self.s.dry_run)
           EOF
 
-          # GUI
+          # GUI (AUTO-SCAN + no-files warning)
           cat > MiniFileBot/app_gui.py <<'EOF'
           from PySide6.QtWidgets import *
           from PySide6.QtCore import Qt
@@ -254,19 +254,30 @@ jobs:
                 self.cfg.setdefault("providers",{})["preference"]=self.db.currentText(); save(self.cfg); self.engine=Engine(self.cfg)
             def on_add(self):
               d=QFileDialog.getExistingDirectory(self,"Choose folder to scan")
-              if d: self.roots.append(Path(d)); self.log.append(f"Added: {d}")
+              if d:
+                p=Path(d); self.roots.append(p); self.log.append(f"Added: {p}")
+                # AUTO-SCAN immediately
+                self.on_fetch()
             def on_fetch(self):
-              if not self.roots: QMessageBox.information(self,"No folders","Add a folder first."); return
+              if not self.roots:
+                QMessageBox.information(self,"No folders","Add a folder first."); return
               self.ensure_engine(); self.left.clear(); self.plans=[]; tot=len(self.roots)
               for i,r in enumerate(self.roots,1):
                 self.plans+=self.engine.plan_batch(r); self.progress.setValue(int(i/tot*100))
+              if not self.plans:
+                QMessageBox.information(self,"No videos found",
+                  "No matching video files were found under the folder(s).\n"
+                  "Try increasing max_depth or check file extensions in config.yaml.")
+                return
               for s,_ in self.plans: self.left.addItem(str(s))
               self.log.append(f"Fetched {len(self.plans)} file(s).")
             def on_match(self):
-              if not self.plans: QMessageBox.information(self,"Nothing to match","Click Fetch Data first."); return
+              if not self.plans:
+                QMessageBox.information(self,"Nothing to match","Click Fetch Data first."); return
               self.right.clear(); [self.right.addItem(str(d)) for _,d in self.plans]; self.log.append("Matched — preview on the right.")
             def on_rename(self):
-              if not self.plans: QMessageBox.information(self,"Nothing to rename","Click Match first."); return
+              if not self.plans:
+                QMessageBox.information(self,"Nothing to rename","Click Match first."); return
               self.ensure_engine()
               if QMessageBox.question(self,"Confirm","Apply rename/move now?")!=QMessageBox.Yes: return
               try: self.engine.execute(self.plans); self.log.append("Rename complete.")
@@ -275,7 +286,7 @@ jobs:
             app=QApplication(sys.argv); w=App(); w.resize(1200,700); w.show(); sys.exit(app.exec())
           EOF
 
-          # WiX (explicit GUID + proper registry key as KeyPath)
+          # WiX with explicit GUID + shortcut
           cat > installer/MiniFileBot.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -338,7 +349,6 @@ jobs:
           if not exist dist\MiniFileBot.exe exit /b 1
           copy config.yaml dist\config.yaml
 
-
       - name: Install WiX Toolset
         run: choco install wixtoolset --yes --no-progress
 
@@ -367,6 +377,7 @@ jobs:
           path: |
             dist/**
             MiniFileBot/dist/**
+
 
 
 
