@@ -332,9 +332,12 @@ jobs:
           pyinstaller --noconfirm --clean --windowed --onefile app_gui.py ^
             --name MiniFileBot ^
             --collect-all PySide6 ^
-            --collect-submodules guessit
+            --collect-all guessit ^
+            --collect-all babelfish ^
+            --collect-all rebulk
           if not exist dist\MiniFileBot.exe exit /b 1
           copy config.yaml dist\config.yaml
+
 
       - name: Install WiX Toolset
         run: choco install wixtoolset --yes --no-progress
