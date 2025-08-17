@@ -16,7 +16,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p MiniFileBot/engine/providers installer dist
-          # Package markers for PyInstaller
           : > MiniFileBot/engine/__init__.py
           : > MiniFileBot/engine/providers/__init__.py
 
@@ -29,7 +28,6 @@ jobs:
           python-dateutil
           EOF
 
-          # Config (you can edit next to the EXE after install)
           cat > MiniFileBot/config.yaml <<'EOF'
           paths:
             movie_dir: ./Movies
@@ -44,7 +42,7 @@ jobs:
             dry_run: true
             skip_samples: true
             max_depth: 100
-          # Set to ["*"] to accept ALL files (no extension filtering)
+          # Set to ["*"] to accept ALL files
           video_exts: [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm", ".flv", ".mk3d"]
           patterns:
             movie: "{title} ({year})/{title} ({year})"
@@ -272,7 +270,6 @@ jobs:
                 apply_action(src,dst,self.s.action,self.s.dry_run)
           EOF
 
-          # -------- app_gui.py (UI fill fix + Add Files + drag&drop + elevation warning) --------
           cat > MiniFileBot/app_gui.py <<'EOF'
           from PySide6.QtWidgets import *
           from PySide6.QtCore import Qt
@@ -297,7 +294,6 @@ jobs:
                   super().__init__(*a, **k)
                   self.setAcceptDrops(True)
                   self.on_dropped = on_dropped
-                  # Ensure text visible on all Windows themes
                   self.setStyleSheet("color: black;")
                   self.setUniformItemSizes(True)
                   self.setAlternatingRowColors(True)
@@ -430,46 +426,6 @@ jobs:
               app=QApplication(sys.argv); w=App(); w.resize(1200,700); w.show(); sys.exit(app.exec())
           EOF
 
-          # -------- WiX installer (Start Menu shortcut) --------
-          cat > installer/MiniFileBot.wxs <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-            <Product Id="*" Name="MiniFileBot" Language="1033" Version="1.0.0" Manufacturer="MiniFileBot" UpgradeCode="A1B2C3D4-E5F6-4A7B-8C9D-0123456789AB">
-              <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
-              <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
-              <MajorUpgrade AllowDowngrades="no" DowngradeErrorMessage="A newer version of MiniFileBot is already installed." />
-              <Feature Id="MainFeature" Title="MiniFileBot" Level="1">
-                <ComponentGroupRef Id="AppFiles" />
-                <ComponentRef Id="ApplicationShortcut" />
-              </Feature>
-              <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
-              <UIRef Id="WixUI_InstallDir" />
-              <UIRef Id="WixUI_ErrorProgressText" />
-              <Directory Id="TARGETDIR" Name="SourceDir">
-                <Directory Id="ProgramFilesFolder">
-                  <Directory Id="INSTALLFOLDER" Name="MiniFileBot" />
-                </Directory>
-                <Directory Id="ProgramMenuFolder" />
-              </Directory>
-              <DirectoryRef Id="ProgramMenuFolder">
-                <Component Id="ApplicationShortcut" Guid="{8F2C2F9D-2F3A-4B1E-A3B4-9D3E3C6F9B12}">
-                  <Shortcut Id="ApplicationStartMenuShortcut" Name="MiniFileBot" Target="[INSTALLFOLDER]MiniFileBot.exe" WorkingDirectory="INSTALLFOLDER" />
-                  <RemoveFolder Id="RemoveShortcutFolder" Directory="ProgramMenuFolder" On="uninstall" />
-                  <RegistryValue Root="HKCU" Key="Software\MiniFileBot" Name="StartMenu" Type="string" Value="1" KeyPath="yes" />
-                </Component>
-              </DirectoryRef>
-              <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
-                <Component Id="ExeComponent" Guid="*">
-                  <File Id="MiniFileBotExe" Source ="$(var.BuildOutput)\MiniFileBot.exe" KeyPath="yes" />
-                </Component>
-                <Component Id="ConfigComponent" Guid="*">
-                  <File Id="ConfigYaml"  Source ="$(var.BuildOutput)\config.yaml" />
-                </Component>
-              </ComponentGroup>
-            </Product>
-          </Wix>
-          EOF
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -501,9 +457,9 @@ jobs:
       - name: Add WiX to PATH
         shell: pwsh
         run: |
-          $wix = Get-ChildItem "C:\Program Files (x86)\WiX Toolset *\bin" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $wix) { Write-Error "WiX bin folder not found."); exit 1 }
-          "$($wix.FullName)" | Out-File -FilePath $env:GITHUB_PATH -Append
+          $wix = Get-ChildItem 'C:\Program Files (x86)\WiX Toolset *\bin' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $wix) { Write-Error 'WiX bin folder not found.'; exit 1 }
+          $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Build MSI (WiX)
         shell: cmd
@@ -523,6 +479,7 @@ jobs:
           path: |
             dist/**
             MiniFileBot/dist/**
+
 
 
 
