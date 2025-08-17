@@ -1,4 +1,4 @@
-name: Build MiniFileBot MSI (self-contained, autoscan)
+name: Build MiniFileBot MSI (autoscan + better scan)
 
 on:
   push:
@@ -26,6 +26,7 @@ jobs:
           python-dateutil
           EOF
 
+          # ---- Config now controls depth + extensions ----
           cat > MiniFileBot/config.yaml <<'EOF'
           paths:
             movie_dir: ./Movies
@@ -39,7 +40,8 @@ jobs:
             action: move
             dry_run: true
             skip_samples: true
-            max_depth: 5
+            max_depth: 20
+          video_exts: [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm", ".flv", ".mk3d"]
           patterns:
             movie: "{title} ({year})/{title} ({year})"
             episode: "{series}/Season {season:02}/{series} - S{season:02}E{episode:02} - {title}"
@@ -137,6 +139,7 @@ jobs:
               except Exception: return None
           EOF
 
+          # ---------- Engine: configurable extensions, depth, skip-samples, scan stats ----------
           cat > MiniFileBot/engine/core.py <<'EOF'
           import os
           from dataclasses import dataclass
@@ -149,29 +152,52 @@ jobs:
           from .providers.anilist import AniList
           from .renamers import Ctx, rend
           from .utils import apply_action
-          VIDEO={".mkv",".mp4",".avi",".mov",".wmv",".m4v",".ts"}
+
           @dataclass
           class Settings:
-            movie_dir: Path; tv_dir: Path; pattern_movie: str; pattern_episode: str; pattern_anime_abs: str
+            movie_dir: Path; tv_dir: Path
+            pattern_movie: str; pattern_episode: str; pattern_anime_abs: str
             action: str; dry_run: bool; skip_samples: bool; max_depth: int; preference: str
+            exts: set[str]
+
           class Engine:
             def __init__(self,cfg:dict):
               paths=cfg.get("paths",{}); prov=cfg.get("providers",{}); beh=cfg.get("behavior",{}); patt=cfg.get("patterns",{})
-              self.s=Settings(Path(paths.get("movie_dir","./Movies")),Path(paths.get("tv_dir","./TV")),
+              exts=set(e.lower() for e in (cfg.get("video_exts") or [".mkv",".mp4",".avi",".mov",".wmv",".m4v",".ts",".m2ts",".webm",".flv",".mk3d"]))
+              self.s=Settings(
+                Path(paths.get("movie_dir","./Movies")), Path(paths.get("tv_dir","./TV")),
                 patt.get("movie","{title} ({year})/{title} ({year})"),
                 patt.get("episode","{series}/Season {season:02}/{series} - S{season:02}E{episode:02} - {title}"),
                 patt.get("anime_absolute","{series}/{series} - {absolute:03}"),
-                beh.get("action","move"),beh.get("dry_run",True),beh.get("skip_samples",True),int(beh.get("max_depth",5)),prov.get("preference","Auto"))
+                beh.get("action","move"), bool(beh.get("dry_run",True)),
+                bool(beh.get("skip_samples",True)), int(beh.get("max_depth",5)),
+                prov.get("preference","Auto"), exts
+              )
               tm=prov.get("tmdb",{}); tv=prov.get("tvdb",{}); an=prov.get("anilist",{})
               self.tmdb=TMDb(api_key=os.getenv("TMDB_API_KEY",tm.get("api_key","")),language=tm.get("language","en-US"))
               self.tvdb=None; k=os.getenv("TVDB_API_KEY",tv.get("api_key",""))
               if k: self.tvdb=TVDB(api_key=k,pin=os.getenv("TVDB_PIN",tv.get("pin")))
-              self.anilist= AniList() if an.get("enabled",True) else None
+              self.anilist= AniList() if (an.get("enabled",True)) else None
+
+            def is_video(self,p:Path)->bool:
+              return p.suffix.lower() in self.s.exts
+
             def walk(self,root:Path):
+              root = root.resolve()
+              base_parts = len(root.parts)
               for dp,_,fns in os.walk(root):
+                # enforce max_depth
+                depth = len(Path(dp).parts) - base_parts
+                if depth > self.s.max_depth:
+                  continue
                 for fn in fns:
                   p=Path(dp)/fn
-                  if p.suffix.lower() in VIDEO: yield p
+                  if not self.is_video(p):
+                    continue
+                  if self.s.skip_samples and "sample" in p.name.lower():
+                    continue
+                  yield p
+
             def tmdb_movie(self,info):
               t=info.get("title") or info.get("movie_title") or info.get("series"); y=info.get("year")
               if not t: return None
@@ -182,9 +208,11 @@ jobs:
               try: y=int(y)
               except Exception: y=info.get("year")
               return name,y
+
             def tmdb_series(self,info):
               t=info.get("series") or info.get("title")
               return self.tmdb.search_tv(t) if t else None
+
             def tvdb_map(self,series,absno):
               if not self.tvdb: return None
               s=self.tvdb.search_series(series)
@@ -193,6 +221,7 @@ jobs:
               if not sid: return None
               m=self.tvdb.build_absolute_map(sid)
               return m.get(int(absno))
+
             def plan_for(self,p:Path):
               info=parse_filename(p.name); ext=p.suffix
               if info.get("type")=="movie":
@@ -212,19 +241,23 @@ jobs:
                   rel=rend(self.s.pattern_anime_abs,Ctx(series=series,absolute=absno),ext); return p, self.s.tv_dir/rel
                 rel=rend(self.s.pattern_episode,Ctx(series=series,season=int(season),episode=int(ep)),ext); return p, self.s.tv_dir/rel
               return None
+
             def plan_batch(self,root:Path):
-              out=[]
+              scanned=0; planned=0; out=[]
               for f in self.walk(root):
+                scanned += 1
                 pl=self.plan_for(f)
-                if pl: out.append(pl)
+                if pl: out.append(pl); planned += 1
+              print(f"[scan] {root} -> files scanned: {scanned}, planned: {planned}")
               return out
+
             def execute(self,plans:list[tuple]):
               for src,dst in plans:
                 print(f'{"[DRY-RUN] " if self.s.dry_run else ""}{src} -> {dst}')
                 apply_action(src,dst,self.s.action,self.s.dry_run)
           EOF
 
-          # GUI (AUTO-SCAN + no-files warning)
+          # GUI with autoscan + no-files warning (unchanged from last time)
           cat > MiniFileBot/app_gui.py <<'EOF'
           from PySide6.QtWidgets import *
           from PySide6.QtCore import Qt
@@ -256,7 +289,6 @@ jobs:
               d=QFileDialog.getExistingDirectory(self,"Choose folder to scan")
               if d:
                 p=Path(d); self.roots.append(p); self.log.append(f"Added: {p}")
-                # AUTO-SCAN immediately
                 self.on_fetch()
             def on_fetch(self):
               if not self.roots:
@@ -267,7 +299,7 @@ jobs:
               if not self.plans:
                 QMessageBox.information(self,"No videos found",
                   "No matching video files were found under the folder(s).\n"
-                  "Try increasing max_depth or check file extensions in config.yaml.")
+                  "Tip: open config.yaml and adjust 'video_exts' or increase 'max_depth'.")
                 return
               for s,_ in self.plans: self.left.addItem(str(s))
               self.log.append(f"Fetched {len(self.plans)} file(s).")
@@ -286,7 +318,7 @@ jobs:
             app=QApplication(sys.argv); w=App(); w.resize(1200,700); w.show(); sys.exit(app.exec())
           EOF
 
-          # WiX with explicit GUID + shortcut
+          # WiX (same as your passing build)
           cat > installer/MiniFileBot.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -316,10 +348,10 @@ jobs:
               </DirectoryRef>
               <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
                 <Component Id="ExeComponent" Guid="*">
-                  <File Id="MiniFileBotExe" Source="$(var.BuildOutput)\MiniFileBot.exe" KeyPath="yes" />
+                  <File Id="MiniFileBotExe" Source ="$(var.BuildOutput)\MiniFileBot.exe" KeyPath="yes" />
                 </Component>
                 <Component Id="ConfigComponent" Guid="*">
-                  <File Id="ConfigYaml" Source ="$(var.BuildOutput)\config.yaml" />
+                  <File Id="ConfigYaml"  Source ="$(var.BuildOutput)\config.yaml" />
                 </Component>
               </ComponentGroup>
             </Product>
@@ -377,6 +409,7 @@ jobs:
           path: |
             dist/**
             MiniFileBot/dist/**
+
 
 
 
