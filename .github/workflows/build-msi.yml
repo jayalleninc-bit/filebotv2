@@ -1,4 +1,4 @@
-name: Build MiniFileBot MSI (robust scan + drag&drop)
+name: Build MiniFileBot MSI (package-fix)
 
 on:
   push:
@@ -16,6 +16,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p MiniFileBot/engine/providers installer dist
+          # --- package markers so PyInstaller can import engine.* ---
+          touch MiniFileBot/engine/__init__.py
+          touch MiniFileBot/engine/providers/__init__.py
 
           cat > MiniFileBot/requirements.txt <<'EOF'
           PySide6
@@ -26,7 +29,6 @@ jobs:
           python-dateutil
           EOF
 
-          # Very permissive defaults; you can set video_exts: ["*"] to accept all files.
           cat > MiniFileBot/config.yaml <<'EOF'
           paths:
             movie_dir: ./Movies
@@ -48,6 +50,7 @@ jobs:
             anime_absolute: "{series}/{series} - {absolute:03}"
           EOF
 
+          # --- engine utils/parsers/renamers/providers/core (same as previous robust build) ---
           cat > MiniFileBot/engine/utils.py <<'EOF'
           from pathlib import Path
           import os, shutil
@@ -124,7 +127,21 @@ jobs:
               return m
           EOF
 
-          # ---------- Engine: wildcard exts, deep crawl, scan stats, plan specific files ----------
+          cat > MiniFileBot/engine/providers/anilist.py <<'EOF'
+          import requests
+          API="https://graphql.anilist.co"
+          Q="""
+          query ($search: String) {
+            Media(search: $search, type: ANIME) { id title { romaji english native } episodes season seasonYear format synonyms }
+          }
+          """
+          class AniList:
+            def __init__(self): self.s=requests.Session()
+            def search(self,q):
+              try: r=self.s.post(API,json={"query":Q,"variables":{"search":q}},timeout=20); r.raise_for_status(); return r.json().get("data",{}).get("Media")
+              except Exception: return None
+          EOF
+
           cat > MiniFileBot/engine/core.py <<'EOF'
           import os
           from dataclasses import dataclass
@@ -257,7 +274,6 @@ jobs:
                 apply_action(src,dst,self.s.action,self.s.dry_run)
           EOF
 
-          # GUI: autoscan, drag&drop (files or folders), Scan Debug button
           cat > MiniFileBot/app_gui.py <<'EOF'
           from PySide6.QtWidgets import *
           from PySide6.QtCore import Qt, QUrl
@@ -304,7 +320,6 @@ jobs:
                 p=Path(d); self.roots.append(p); self.log.append(f"Added: {p}")
                 self.on_fetch()
             def on_drop(self, paths):
-              # paths can be files or folders
               folders=[p for p in paths if p.is_dir()]
               files=[p for p in paths if p.is_file()]
               if folders: self.roots.extend(folders); self.log.append(f"Dropped folders: {', '.join(str(x) for x in folders)}"); self.on_fetch()
@@ -335,13 +350,12 @@ jobs:
               if not self.roots: QMessageBox.information(self,"No folders","Add a folder first."); return
               self.ensure_engine()
               for r in self.roots:
-                self.engine.plan_batch(r)  # prints [scan]/[plan] to log
+                self.engine.plan_batch(r)
               self.log.append("Debug scan completed. See lines above for counts.")
           if __name__=="__main__":
             app=QApplication(sys.argv); w=App(); w.resize(1200,700); w.show(); sys.exit(app.exec())
           EOF
 
-          # WiX (same as your passing build)
           cat > installer/MiniFileBot.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -400,7 +414,9 @@ jobs:
             --collect-all PySide6 ^
             --collect-all guessit ^
             --collect-all babelfish ^
-            --collect-all rebulk
+            --collect-all rebulk ^
+            --collect-submodules engine ^
+            --collect-submodules engine.providers
           if not exist dist\MiniFileBot.exe exit /b 1
           copy config.yaml dist\config.yaml
 
