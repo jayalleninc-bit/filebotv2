@@ -1,4 +1,4 @@
-name: Build MiniFileBot MSI (self-contained, debug)
+name: Build MiniFileBot MSI (self-contained, fixed WXS)
 
 on:
   push:
@@ -11,15 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show runner basics (debug)
-        shell: bash
-        run: |
-          echo "OS:"; uname -a || ver
-          echo "Disk:"; df -h || true
-          echo "Chocolatey:"; choco --version || true
-
-      # 1) Bootstrap all project files (bash to avoid YAML quoting issues)
-      - name: Bootstrap project files
+      - name: Bootstrap project files (bash)
         shell: bash
         run: |
           set -euo pipefail
@@ -282,6 +274,7 @@ jobs:
             app=QApplication(sys.argv); w=App(); w.resize(1200,700); w.show(); sys.exit(app.exec())
           EOF
 
+          # WiX (fixed - removed RegistryValue that caused ICE03)
           cat > installer/MiniFileBot.wxs <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -306,7 +299,6 @@ jobs:
                 <Component Id="ApplicationShortcut" Guid="*">
                   <Shortcut Id="ApplicationStartMenuShortcut" Name="MiniFileBot" Target="[INSTALLFOLDER]MiniFileBot.exe" WorkingDirectory="INSTALLFOLDER" />
                   <RemoveFolder Id="RemoveShortcutFolder" Directory="ProgramMenuFolder" On="uninstall" />
-                  <RegistryValue Root="HKCU" Key="Software\\MiniFileBot" Name="installed" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
               </DirectoryRef>
               <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
@@ -335,7 +327,6 @@ jobs:
         shell: cmd
         working-directory: MiniFileBot
         run: |
-          dir
           pyinstaller --noconfirm --clean --windowed --onefile app_gui.py ^
             --name MiniFileBot ^
             --collect-all PySide6 ^
@@ -346,22 +337,15 @@ jobs:
           )
           copy config.yaml dist\config.yaml
 
-      - name: Install WiX Toolset (for MSI)
+      - name: Install WiX Toolset
         run: choco install wixtoolset --yes --no-progress
 
-      - name: Ensure WiX is on PATH
+      - name: Add WiX to PATH
         shell: pwsh
         run: |
           $wix = Get-ChildItem "C:\Program Files (x86)\WiX Toolset *\bin" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $wix) { Write-Error "WiX bin folder not found."; exit 1 }
-          echo "Using WiX at: $($wix.FullName)"
-          echo "$($wix.FullName)" | Out-File -FilePath $env:GITHUB_PATH -Append
-
-      - name: Verify WiX tools (debug)
-        shell: cmd
-        run: |
-          where candle.exe
-          where light.exe
+          "$($wix.FullName)" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Build MSI (WiX)
         shell: cmd
@@ -369,26 +353,11 @@ jobs:
         run: |
           if not exist ..\dist mkdir ..\dist
           set BUILDOUT=%CD%\..\MiniFileBot\dist
-          echo BUILDOUT=%BUILDOUT%
-          if not exist "%BUILDOUT%\MiniFileBot.exe" (
-            echo [ERROR] Missing EXE at %BUILDOUT%\MiniFileBot.exe
-            exit /b 1
-          )
           candle.exe -dBuildOutput="%BUILDOUT%" MiniFileBot.wxs -o MiniFileBot.wixobj
           if errorlevel 1 exit /b 1
           light.exe MiniFileBot.wixobj -ext WixUIExtension -o ..\dist\MiniFileBot-Installer.msi
           if errorlevel 1 exit /b 1
-          if not exist ..\dist\MiniFileBot-Installer.msi (
-            echo [ERROR] MSI not created.
-            exit /b 1
-          )
-          echo MSI ready.
-
-      - name: List dist (debug)
-        shell: bash
-        run: |
-          echo "Root dist:"; ls -al dist || true
-          echo "App dist:"; ls -al MiniFileBot/dist || true
+          if not exist ..\dist\MiniFileBot-Installer.msi exit /b 1
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -397,4 +366,5 @@ jobs:
           path: |
             dist/**
             MiniFileBot/dist/**
+
 
