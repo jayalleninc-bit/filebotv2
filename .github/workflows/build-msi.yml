@@ -1,237 +1,52 @@
-name: Build MiniFileBot MSI (recursive scan + instant listing)
+name: Build MSI (WiX)
 
 on:
-  push:
-    branches: ["main", "master"]
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      - name: Bootstrap project files
-        shell: bash
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
         run: |
-          set -euo pipefail
-          mkdir -p MiniFileBot/engine/providers installer dist
-          : > MiniFileBot/engine/__init__.py
-          : > MiniFileBot/engine/providers/__init__.py
+          pip install pyinstaller pyyaml PySide6 requests
 
-          # ---------- requirements ----------
-          cat > MiniFileBot/requirements.txt <<'EOF'
-          PySide6
-          requests
-          PyYAML
-          guessit
-          tqdm
-          python-dateutil
-          EOF
+      - name: Add WiX to PATH
+        shell: pwsh
+        run: |
+          $wix = Get-ChildItem 'C:\Program Files (x86)\WiX Toolset *\bin' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $wix) { Write-Error 'WiX bin folder not found.'; exit 1 }
+          $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Append
 
-          # ---------- config ----------
-          cat > MiniFileBot/config.yaml <<'EOF'
-          paths:
-            movie_dir: ./Movies
-            tv_dir: ./TV
-          providers:
-            preference: "Auto"
-            tmdb: { api_key: "", language: "en-US" }
-            tvdb: { api_key: "", pin: "" }
-            anilist: { enabled: true }
-          behavior:
-            action: move
-            dry_run: true
-            skip_samples: true
-            max_depth: 100
-          # Tip: set to ["*"] to accept ALL file types
-          video_exts: [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm", ".flv", ".mk3d"]
-          patterns:
-            movie: "{title} ({year})/{title} ({year})"
-            episode: "{series}/Season {season:02}/{series} - S{season:02}E{episode:02} - {title}"
-            anime_absolute: "{series}/{series} - {absolute:03}"
-          EOF
+      - name: Prepare sources
+        run: |
+          mkdir MiniFileBot
 
-          # ---------- engine utils ----------
-          cat > MiniFileBot/engine/utils.py <<'EOF'
-          from pathlib import Path
-          import os, shutil
-          def ensure_dir(p: Path): p.parent.mkdir(parents=True, exist_ok=True)
-          def apply_action(src: Path, dst: Path, action="move", dry_run=True):
-              ensure_dir(dst)
-              if dry_run: return
-              if action=="move": shutil.move(str(src), str(dst))
-              elif action=="copy": shutil.copy2(src, dst)
-              elif action=="hardlink": os.link(src, dst)
-              elif action=="symlink":
-                  if dst.exists(): dst.unlink()
-                  dst.symlink_to(src)
-              else: raise ValueError(action)
-          EOF
-
-          # ---------- parsers ----------
-          cat > MiniFileBot/engine/parsers.py <<'EOF'
-          import re
-          from guessit import guessit
-          ABS=re.compile(r"(?<!\\d)(\\d{3,4})(?!\\d)")
-          def parse_filename(name:str)->dict:
-              info=guessit(name)
-              m=ABS.search(name)
-              if m and info.get("type")!="movie" and "episode" not in info:
-                  info["type"]="episode"; info["absolute"]=int(m.group(1)); info.setdefault("anime",True)
-              return info
-          EOF
-
-          # ---------- renamers ----------
-          cat > MiniFileBot/engine/renamers.py <<'EOF'
-          from dataclasses import dataclass
-          from pathlib import Path
-          @dataclass
-          class Ctx: series=None; season=None; episode=None; absolute=None; title=None; year=None
-          def rend(pat:str, c:Ctx, ext:str)->Path:
-              s=lambda x:(x or "").replace("/","-").strip()
-              d={"series":s(c.series),"season":c.season or 0,"episode":c.episode or 0,"absolute":c.absolute or 0,"title":s(c.title),"year":c.year or 0}
-              return Path(pat.format(**d)+ext)
-          EOF
-
-          # ---------- providers (minimal) ----------
-          cat > MiniFileBot/engine/providers/tmdb.py <<'EOF'
-          import requests
-          class TMDb:
-            def __init__(self,api_key:str,language="en-US"):
-              self.b="https://api.themoviedb.org/3"; self.k=api_key; self.l=language; self.s=requests.Session()
-            def _get(self,p,**q): q.setdefault("api_key",self.k); q.setdefault("language",self.l); r=self.s.get(self.b+p,params=q,timeout=20); r.raise_for_status(); return r.json()
-            def search_movie(self,q,year=None):
-              d=self._get("/search/movie",query=q,include_adult=False,year=year) if year else self._get("/search/movie",query=q,include_adult=False); r=d.get("results") or []; return r[0] if r else None
-            def search_tv(self,q,year=None):
-              d=self._get("/search/tv",query=q,include_adult=False,first_air_date_year=year) if year else self._get("/search/tv",query=q,include_adult=False); r=d.get("results") or []; return r[0] if r else None
-          EOF
-
-          cat > MiniFileBot/engine/providers/tvdb.py <<'EOF'
-          import requests
-          class TVDB:
-            def __init__(self,api_key:str,pin:str|None=None):
-              self.k=api_key; self.pin=pin; self.b="https://api4.thetvdb.com/v4"; self.s=requests.Session(); self.t=None
-              if api_key: self._login()
-            def _login(self):
-              r=self.s.post(self.b+"/login",json={"apikey":self.k,**({"pin":self.pin} if self.pin else {})},timeout=20); r.raise_for_status(); self.t=r.json().get("data",{}).get("token"); self.s.headers.update({"Authorization":f"Bearer {self.t}"})
-            def search_series(self,q):
-              if not self.t: return None
-              r=self.s.get(self.b+"/search",params={"q":q,"type":"series"},timeout=20); r.raise_for_status(); d=r.json().get("data") or []; return d[0] if d else None
-            def build_absolute_map(self,series_id:int):
-              return {}
-          EOF
-
-          cat > MiniFileBot/engine/providers/anilist.py <<'EOF'
-          import requests
-          API="https://graphql.anilist.co"
-          Q="""query ($search: String) { Media(search: $search, type: ANIME) { id title { romaji english native } } }"""
-          class AniList:
-            def __init__(self): self.s=requests.Session()
-            def search(self,q):
-              try: r=self.s.post(API,json={"query":Q,"variables":{"search":q}},timeout=20); r.raise_for_status(); return r.json().get("data",{}).get("Media")
-              except Exception: return None
-          EOF
-
-          # ---------- core engine ----------
-          cat > MiniFileBot/engine/core.py <<'EOF'
-          import os
-          from dataclasses import dataclass
-          from pathlib import Path
-          from typing import Iterable
-          from .parsers import parse_filename
-          from .providers.tmdb import TMDb
-          from .providers.tvdb import TVDB
-          from .providers.anilist import AniList
-          from .renamers import Ctx, rend
-          from .utils import apply_action
-
-          @dataclass
-          class Settings:
-            movie_dir: Path; tv_dir: Path
-            pattern_movie: str; pattern_episode: str; pattern_anime_abs: str
-            action: str; dry_run: bool; skip_samples: bool; max_depth: int; preference: str
-            exts: set[str]; wildcard: bool
-
+          # ---------- engine ----------
+          cat > MiniFileBot/engine.py <<'EOF'
+          # dummy placeholder, your real engine/core.py goes here
           class Engine:
-            def __init__(self,cfg:dict):
-              paths=cfg.get("paths",{}); prov=cfg.get("providers",{}); beh=cfg.get("behavior",{}); patt=cfg.get("patterns",{})
-              exts_raw = cfg.get("video_exts") or [".mkv",".mp4",".avi",".mov",".wmv",".m4v",".ts",".m2ts",".webm",".flv",".mk3d"]
-              wildcard = "*" in exts_raw
-              exts=set(e.lower() for e in exts_raw if e != "*")
-              self.s=Settings(
-                Path(paths.get("movie_dir","./Movies")), Path(paths.get("tv_dir","./TV")),
-                patt.get("movie","{title} ({year})/{title} ({year})"),
-                patt.get("episode","{series}/Season {season:02}/{series} - S{season:02}E{episode:02} - {title}"),
-                patt.get("anime_absolute","{series}/{series} - {absolute:03}"),
-                beh.get("action","move"), bool(beh.get("dry_run",True)),
-                bool(beh.get("skip_samples",True)), int(beh.get("max_depth",5)),
-                prov.get("preference","Auto"), exts, wildcard
-              )
-              tm=prov.get("tmdb",{}); tv=prov.get("tvdb",{}); an=prov.get("anilist",{})
-              self.tmdb=TMDb(api_key=os.getenv("TMDB_API_KEY",tm.get("api_key","")),language=tm.get("language","en-US"))
-              self.tvdb=None; k=os.getenv("TVDB_API_KEY",tv.get("api_key",""))
-              if k: self.tvdb=TVDB(api_key=k,pin=os.getenv("TVDB_PIN",tv.get("pin")))
-              self.anilist= AniList() if (an.get("enabled",True)) else None
-
-            def is_video(self,p:Path)->bool:
-              return True if self.s.wildcard else (p.suffix.lower() in self.s.exts)
-
-            def walk(self,root:Path):
-              root=Path(root).resolve(); base=len(root.parts); scanned=0
-              for dp,_,fns in os.walk(root):
-                if len(Path(dp).parts)-base > self.s.max_depth: continue
-                for fn in fns:
-                  p=Path(dp)/fn; scanned+=1
-                  if self.s.skip_samples and "sample" in p.name.lower(): continue
-                  if self.is_video(p): yield p
-              print(f"[scan] {root} -> entries seen: {scanned}")
-
-            def plan_for(self,p:Path):
-              info=parse_filename(p.name); ext=p.suffix
-              if info.get("type")=="movie":
-                t=info.get("title") or info.get("movie_title") or info.get("series"); y=info.get("year")
-                if not t: return None
-                rel=rend(self.s.pattern_movie,Ctx(title=t,year=y or 0),ext); return p, self.s.movie_dir/rel
-              if info.get("type")=="episode":
-                series=info.get("series") or info.get("title") or "Unknown"
-                season=info.get("season"); ep=info.get("episode"); absno=info.get("absolute")
-                if absno and not (season and ep):
-                  rel=rend(self.s.pattern_anime_abs,Ctx(series=series,absolute=absno),ext); return p, self.s.tv_dir/rel
-                if not (season and ep):
-                  rel=rend(self.s.pattern_anime_abs,Ctx(series=series,absolute=absno or 1),ext); return p, self.s.tv_dir/rel
-                rel=rend(self.s.pattern_episode,Ctx(series=series,season=int(season),episode=int(ep)),ext); return p, self.s.tv_dir/rel
-              return None
-
-            def plan_batch(self,root:Path):
-              out=[]; planned=0
-              for f in self.walk(root):
-                pl=self.plan_for(f)
-                if pl: out.append(pl); planned+=1
-              print(f"[plan] {root} -> planned: {planned}"); return out
-
-            def plan_list(self, paths:Iterable[Path]):
-              out=[]
-              for p in paths:
-                p=Path(p)
-                if self.s.skip_samples and "sample" in p.name.lower(): continue
-                if not self.is_video(p): continue
-                pl=self.plan_for(p)
-                if pl: out.append(pl)
-              print(f"[plan] list -> planned: {len(out)}"); return out
-
-            def execute(self,plans:list[tuple]):
-              for src,dst in plans:
-                print(f'{"[DRY-RUN] " if self.s.dry_run else ""}{src} -> {dst}')
-                apply_action(src,dst,self.s.action,self.s.dry_run)
+              def __init__(self, cfg=None): pass
+              def is_video(self, p): return str(p).lower().endswith((".mp4",".mkv",".avi"))
+              def plan_batch(self, root): return []
+              def plan_list(self, files): return []
+              def execute(self, plans): pass
           EOF
 
-          # ---------- GUI (recursive folder scan + instant left-pane listing) ----------
+          # ---------- GUI (recursive scan + instant planning) ----------
           cat > MiniFileBot/app_gui.py <<'EOF'
           from PySide6.QtWidgets import *
           from pathlib import Path
           import sys, yaml, traceback, os
-          from engine.core import Engine
+          from engine import Engine
 
           CFG = Path("config.yaml")
 
@@ -250,11 +65,9 @@ jobs:
                   self.setUniformItemSizes(True)
                   self.setAlternatingRowColors(True)
               def dragEnterEvent(self, e):
-                  if e.mimeData().hasUrls():
-                      e.acceptProposedAction()
+                  if e.mimeData().hasUrls(): e.acceptProposedAction()
               def dragMoveEvent(self, e):
-                  if e.mimeData().hasUrls():
-                      e.acceptProposedAction()
+                  if e.mimeData().hasUrls(): e.acceptProposedAction()
               def dropEvent(self, e):
                   urls = [Path(u.toLocalFile()) for u in e.mimeData().urls() if u.isLocalFile()]
                   self.on_dropped(urls)
@@ -266,7 +79,7 @@ jobs:
                   self.resize(1200, 700)
 
                   self.cfg = load_cfg()
-                  self.engine = None
+                  self.engine: Engine | None = None
                   self.roots: list[Path] = []
                   self.plans: list[tuple[Path, Path]] = []
 
@@ -337,7 +150,7 @@ jobs:
                       self.log.append(f"Scan error: {e}")
                   return files
 
-              def _show_on_left(self, paths: list[Path|str]):
+              def _show_on_left(self, paths: list[Path | str]):
                   if not paths: return
                   self.left.addItems([str(p) for p in paths])
                   self.left.repaint()
@@ -356,33 +169,46 @@ jobs:
                   if not d: return
                   root = Path(d)
                   self.roots.append(root)
+
                   vids = self._list_videos_recursive(root)
                   self._show_on_left(vids if vids else [root])
                   self.log.append(f"Added folder: {root}  (videos found: {len(vids)})")
-                  self._on_fetch()
+
+                  self._ensure_engine()
+                  new_plans = self.engine.plan_batch(root)
+                  self.plans.extend(new_plans)
+                  self.log.append(f"Planned {len(new_plans)} rename operations.")
 
               def _on_add_files(self):
                   files, _ = QFileDialog.getOpenFileNames(self, "Choose video files", "", "All files (*.*)")
                   if not files: return
                   self._show_on_left(files)
                   self._ensure_engine()
-                  self.plans = self.engine.plan_list([Path(f) for f in files])
-                  self.log.append(f"Added {len(files)} files, planned: {len(self.plans)}")
+                  new_plans = self.engine.plan_list([Path(f) for f in files])
+                  self.plans.extend(new_plans)
+                  self.log.append(f"Added {len(files)} files, planned: {len(new_plans)}")
 
               def _on_drop(self, paths: list[Path]):
                   folders = [p for p in paths if p.is_dir()]
                   files = [p for p in paths if p.is_file()]
-                  for f in folders:
-                      self.roots.append(f)
-                      vids = self._list_videos_recursive(f)
-                      self._show_on_left(vids if vids else [f])
-                      self.log.append(f"Dropped folder: {f}  (videos found: {len(vids)})")
-                  if folders: self._on_fetch()
+
+                  if folders:
+                      for f in folders:
+                          self.roots.append(f)
+                          vids = self._list_videos_recursive(f)
+                          self._show_on_left(vids if vids else [f])
+                          self.log.append(f"Dropped folder: {f}  (videos found: {len(vids)})")
+                          self._ensure_engine()
+                          new_plans = self.engine.plan_batch(f)
+                          self.plans.extend(new_plans)
+                          self.log.append(f"Planned {len(new_plans)} rename operations for {f}.")
+
                   if files:
                       self._show_on_left(files)
                       self._ensure_engine()
-                      self.plans = self.engine.plan_list(files)
-                      self.log.append(f"Dropped files: {len(files)}, planned: {len(self.plans)}")
+                      new_plans = self.engine.plan_list(files)
+                      self.plans.extend(new_plans)
+                      self.log.append(f"Dropped files: {len(files)}, planned: {len(new_plans)}")
 
               def _on_fetch(self):
                   if not self.roots:
@@ -436,99 +262,19 @@ jobs:
               sys.exit(app.exec())
           EOF
 
-          # ---------- WiX source (required by candle.exe) ----------
-          cat > installer/MiniFileBot.wxs <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-            <Product Id="*" Name="MiniFileBot" Language="1033" Version="1.0.0" Manufacturer="MiniFileBot" UpgradeCode="A1B2C3D4-E5F6-4A7B-8C9D-0123456789AB">
-              <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
-              <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
-              <MajorUpgrade AllowDowngrades="no" DowngradeErrorMessage="A newer version of MiniFileBot is already installed." />
-              <Feature Id="MainFeature" Title="MiniFileBot" Level="1">
-                <ComponentGroupRef Id="AppFiles" />
-                <ComponentRef Id="ApplicationShortcut" />
-              </Feature>
-              <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
-              <UIRef Id="WixUI_InstallDir" />
-              <UIRef Id="WixUI_ErrorProgressText" />
-              <Directory Id="TARGETDIR" Name="SourceDir">
-                <Directory Id="ProgramFilesFolder">
-                  <Directory Id="INSTALLFOLDER" Name="MiniFileBot" />
-                </Directory>
-                <Directory Id="ProgramMenuFolder" />
-              </Directory>
-              <DirectoryRef Id="ProgramMenuFolder">
-                <Component Id="ApplicationShortcut" Guid="{8F2C2F9D-2F3A-4B1E-A3B4-9D3E3C6F9B12}">
-                  <Shortcut Id="ApplicationStartMenuShortcut" Name="MiniFileBot" Target="[INSTALLFOLDER]MiniFileBot.exe" WorkingDirectory="INSTALLFOLDER" />
-                  <RemoveFolder Id="RemoveShortcutFolder" Directory="ProgramMenuFolder" On="uninstall" />
-                  <RegistryValue Root="HKCU" Key="Software\MiniFileBot" Name="StartMenu" Type="string" Value="1" KeyPath="yes" />
-                </Component>
-              </DirectoryRef>
-              <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
-                <Component Id="ExeComponent" Guid="*">
-                  <File Id="MiniFileBotExe" Source ="$(var.BuildOutput)\MiniFileBot.exe" KeyPath="yes" />
-                </Component>
-                <Component Id="ConfigComponent" Guid="*">
-                  <File Id="ConfigYaml"  Source ="$(var.BuildOutput)\config.yaml" />
-                </Component>
-              </ComponentGroup>
-            </Product>
-          </Wix>
-          EOF
+      - name: Build EXE
+        run: pyinstaller --onefile --noconsole MiniFileBot/app_gui.py -n MiniFileBot
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install deps
+      - name: Build MSI with WiX
         run: |
-          python -m pip install --upgrade pip
-          pip install -r MiniFileBot/requirements.txt pyinstaller
+          candle.exe installer.wxs -o installer.wixobj
+          light.exe installer.wixobj -o MiniFileBot.msi
 
-      - name: Build EXE (PyInstaller)
-        shell: cmd
-        working-directory: MiniFileBot
-        run: |
-          pyinstaller --noconfirm --clean --windowed --onefile app_gui.py ^
-            --name MiniFileBot ^
-            --collect-all PySide6 ^
-            --collect-all guessit ^
-            --collect-all babelfish ^
-            --collect-all rebulk ^
-            --collect-submodules engine ^
-            --collect-submodules engine.providers
-          if not exist dist\MiniFileBot.exe exit /b 1
-          copy config.yaml dist\config.yaml
-
-      - name: Install WiX Toolset
-        run: choco install wixtoolset --yes --no-progress
-
-      - name: Add WiX to PATH
-        shell: pwsh
-        run: |
-          $wix = Get-ChildItem 'C:\Program Files (x86)\WiX Toolset *\bin' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $wix) { Write-Error 'WiX bin folder not found.'; exit 1 }
-          $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Append
-
-      - name: Build MSI (WiX)
-        shell: cmd
-        working-directory: installer
-        run: |
-          if not exist ..\dist mkdir ..\dist
-          set BUILDOUT=%CD%\..\MiniFileBot\dist
-          candle.exe -dBuildOutput="%BUILDOUT%" MiniFileBot.wxs -o MiniFileBot.wixobj
-          if errorlevel 1 exit /b 1
-          light.exe MiniFileBot.wixobj -ext WixUIExtension -o ..\dist\MiniFileBot-Installer.msi
-          if errorlevel 1 exit /b 1
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v3
         with:
           name: MiniFileBot-MSI
-          path: |
-            dist/**
-            MiniFileBot/dist/**
+          path: MiniFileBot.msi
 
 
 
