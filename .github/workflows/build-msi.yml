@@ -13,16 +13,15 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # ----- Version to stamp into MSI (three-part required by MSI) -----
+      # ----- Version to stamp into MSI (MSI requires 3-part version) -----
       - name: Compute product version
         shell: pwsh
         run: |
-          # Example: 0.1.<run_number>
           $ver = "0.1.$($env:GITHUB_RUN_NUMBER)"
           "PRODUCT_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "PRODUCT_VERSION=$ver"
 
-      # ----- Python toolchain & deps for the real metadata engine -----
+      # ----- Python toolchain & deps -----
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -33,10 +32,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller PySide6 pyyaml requests guessit babelfish rebulk
 
-      # ----- Install WiX Toolset -----
-      - name: Install WiX Toolset
+      # ======= REPLACED: Install WiX Toolset (no version pin) =======
+      - name: Ensure WiX Toolset
         shell: pwsh
-        run: choco install wixtoolset --version=3.14.1.8722 -y
+        run: |
+          choco upgrade wixtoolset --yes --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Upgrade failed (code $LASTEXITCODE). Trying install..."
+            choco install wixtoolset --yes --no-progress --force
+          }
 
       - name: Add WiX to PATH
         shell: pwsh
@@ -45,8 +49,7 @@ jobs:
           if (-not $wix) { Write-Error 'WiX bin folder not found.'; exit 1 }
           $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      # ----- Prepare sources: engine (TMDb), GUI, config, WiX .wxs -----
-      # If you already committed these files to the repo, remove this whole step.
+      # ----- If your sources are already in the repo, remove this block -----
       - name: Prepare sources (engine + GUI + WiX)
         shell: bash
         run: |
@@ -124,7 +127,7 @@ jobs:
               return Path(pattern.format(series=sanitize(c.series), absolute=int(c.absolute or 0))).with_suffix(ext)
           PY
 
-          # Core engine
+          # Core engine (TMDb-backed)
           cat > engine/__init__.py <<'PY'
           from dataclasses import dataclass
           from pathlib import Path
@@ -231,7 +234,7 @@ jobs:
                       else: src.rename(dst)
           PY
 
-          # GUI (instant scan + instant planning)
+          # GUI
           cat > MiniFileBot/app_gui.py <<'PY'
           from PySide6.QtWidgets import *
           from pathlib import Path
@@ -334,7 +337,7 @@ jobs:
               app=QApplication(sys.argv); w=App(); w.show(); sys.exit(app.exec())
           PY
 
-          # config shipped with MSI
+          # Config shipped with MSI
           cat > MiniFileBot/config.yaml <<'YAML'
           paths: { movie_dir: ./Movies, tv_dir: ./TV }
           providers: { tmdb: { api_key: "", language: "en-US" } }  # or set env TMDB_API_KEY
@@ -350,12 +353,8 @@ jobs:
           cat > installer/MiniFileBot.wxs <<'WXS'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-            <Product Id="*"
-                     Name="MiniFileBot"
-                     Language="1033"
-                     Version="$(var.ProductVersion)"
-                     Manufacturer="MiniFileBot"
-                     UpgradeCode="A4E6F40E-8BB0-4410-9C91-6B8B0A9D21E0">
+            <Product Id="*" Name="MiniFileBot" Language="1033" Version="$(var.ProductVersion)"
+                     Manufacturer="MiniFileBot" UpgradeCode="A4E6F40E-8BB0-4410-9C91-6B8B0A9D21E0">
               <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
               <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
               <MajorUpgrade AllowDowngrades="no"
@@ -399,7 +398,7 @@ jobs:
           </Wix>
           WXS
 
-      # ----- Build EXE with PyInstaller -----
+      # ----- Build EXE -----
       - name: Build EXE (PyInstaller)
         shell: cmd
         run: |
@@ -407,7 +406,7 @@ jobs:
           if not exist dist\MiniFileBot.exe exit /b 1
           copy MiniFileBot\config.yaml dist\config.yaml
 
-      # ----- Build MSI with WiX (pass ProductVersion & BuildOut) -----
+      # ----- Build MSI -----
       - name: Build MSI (WiX)
         shell: cmd
         run: |
@@ -428,8 +427,6 @@ jobs:
             dist/MiniFileBot-${{ env.PRODUCT_VERSION }}-Setup.msi
             dist/MiniFileBot.exe
             dist/config.yaml
-
-
 
 
 
