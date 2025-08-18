@@ -1,4 +1,4 @@
-name: Build MiniFileBot MSI (WiX)
+name: Build MiniFileBot MSI (TMDb engine)
 
 on:
   workflow_dispatch: {}
@@ -19,12 +19,11 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller PySide6 pyyaml requests
+          pip install pyinstaller PySide6 pyyaml requests guessit babelfish rebulk
 
       - name: Install WiX Toolset
         shell: pwsh
-        run: |
-          choco install wixtoolset --yes --no-progress
+        run: choco install wixtoolset --yes --no-progress
 
       - name: Add WiX to PATH
         shell: pwsh
@@ -33,24 +32,246 @@ jobs:
           if (-not $wix) { Write-Error 'WiX bin folder not found.'; exit 1 }
           $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      - name: Prepare sources (GUI + minimal engine + WiX .wxs)
+      - name: Prepare sources (real engine + GUI + WiX)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p MiniFileBot installer
+          mkdir -p MiniFileBot installer engine
 
-          # --- Minimal engine placeholder (use your real engine if you already have one) ---
-          cat > MiniFileBot/engine.py <<'PY'
-          class Engine:
-              def __init__(self, cfg=None): pass
-              def is_video(self, p):
-                  return str(p).lower().endswith((".mkv",".mp4",".avi",".mov",".wmv",".m4v",".ts",".m2ts",".webm",".flv",".mk3d"))
-              def plan_batch(self, root): return []
-              def plan_list(self, files): return []
-              def execute(self, plans): pass
+          ############################
+          # engine/tmdb.py
+          ############################
+          cat > engine/tmdb.py <<'PY'
+          import requests
+
+          class TMDb:
+              def __init__(self, api_key: str, language: str = "en-US"):
+                  self.key = api_key or ""
+                  self.lang = language
+                  self.base = "https://api.themoviedb.org/3"
+                  self.s = requests.Session()
+
+              def _get(self, path: str, **params):
+                  if not self.key:
+                      return None
+                  params.setdefault("api_key", self.key)
+                  params.setdefault("language", self.lang)
+                  r = self.s.get(self.base + path, params=params, timeout=20)
+                  r.raise_for_status()
+                  return r.json()
+
+              def search_movie(self, query: str, year=None):
+                  data = self._get("/search/movie", query=query, include_adult=False, year=year) if year \
+                      else self._get("/search/movie", query=query, include_adult=False)
+                  if not data: return None
+                  res = data.get("results") or []
+                  return res[0] if res else None
+
+              def search_tv(self, query: str, year=None):
+                  data = self._get("/search/tv", query=query, first_air_date_year=year) if year \
+                      else self._get("/search/tv", query=query)
+                  if not data: return None
+                  res = data.get("results") or []
+                  return res[0] if res else None
+
+              def season(self, tv_id: int, season_num: int):
+                  return self._get(f"/tv/{tv_id}/season/{season_num}")
+
           PY
 
-          # --- GUI: recursive scan + instant planning (left lists files immediately) ---
+          ############################
+          # engine/parsers.py
+          ############################
+          cat > engine/parsers.py <<'PY'
+          from guessit import guessit
+          import re
+
+          ABS = re.compile(r"(?<!\\d)(\\d{3,4})(?!\\d)")
+
+          def parse_filename(name: str) -> dict:
+              info = guessit(name)
+              # Heuristic: absolute numbering (anime) if 3-4 digits found and not already S/E parsed
+              m = ABS.search(name)
+              if m and info.get("type") != "movie" and not info.get("episode"):
+                  info["type"] = "episode"
+                  info["absolute"] = int(m.group(1))
+                  info["anime"] = True
+              return info
+          PY
+
+          ############################
+          # engine/renamer.py
+          ############################
+          cat > engine/renamer.py <<'PY'
+          from dataclasses import dataclass
+          from pathlib import Path
+
+          @dataclass
+          class Ctx:
+              series: str | None = None
+              season: int | None = None
+              episode: int | None = None
+              absolute: int | None = None
+              title: str | None = None
+              year: int | None = None
+
+          def sanitize(s: str | None) -> str:
+              if not s: return ""
+              return s.replace("/", "-").replace("\\", "-").strip()
+
+          def movie_path(pattern: str, c: Ctx, ext: str) -> Path:
+              return Path(pattern.format(title=sanitize(c.title), year=c.year or 0)).with_suffix(ext)
+
+          def episode_path(pattern: str, c: Ctx, ext: str) -> Path:
+              return Path(pattern.format(series=sanitize(c.series), season=int(c.season or 0),
+                                         episode=int(c.episode or 0), title=sanitize(c.title))).with_suffix(ext)
+
+          def anime_abs_path(pattern: str, c: Ctx, ext: str) -> Path:
+              return Path(pattern.format(series=sanitize(c.series), absolute=int(c.absolute or 0))).with_suffix(ext)
+          PY
+
+          ############################
+          # engine/__init__.py (core)
+          ############################
+          cat > engine/__init__.py <<'PY'
+          from dataclasses import dataclass
+          from pathlib import Path
+          from typing import Iterable, Optional
+          import os
+
+          from .tmdb import TMDb
+          from .parsers import parse_filename
+          from .renamer import Ctx, movie_path, episode_path, anime_abs_path
+
+          @dataclass
+          class Settings:
+              movie_dir: Path
+              tv_dir: Path
+              pattern_movie: str
+              pattern_episode: str
+              pattern_anime_abs: str
+              exts: set[str]
+              action: str
+              dry_run: bool
+
+          class Engine:
+              def __init__(self, cfg: dict | None = None):
+                  cfg = cfg or {}
+                  paths = cfg.get("paths", {})
+                  patt = cfg.get("patterns", {})
+                  beh = cfg.get("behavior", {})
+                  exts = {e.lower() for e in (cfg.get("video_exts") or
+                                              [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm", ".flv", ".mk3d"])}
+
+                  self.s = Settings(
+                      movie_dir=Path(paths.get("movie_dir", "./Movies")),
+                      tv_dir=Path(paths.get("tv_dir", "./TV")),
+                      pattern_movie=patt.get("movie", "{title} ({year})/{title} ({year})"),
+                      pattern_episode=patt.get("episode", "{series}/Season {season:02}/{series} - S{season:02}E{episode:02} - {title}"),
+                      pattern_anime_abs=patt.get("anime_absolute", "{series}/{series} - {absolute:03}"),
+                      exts=exts,
+                      action=beh.get("action", "move"),
+                      dry_run=bool(beh.get("dry_run", True)),
+                  )
+
+                  prov = cfg.get("providers", {})
+                  tmdb_cfg = prov.get("tmdb", {})
+                  api_key = os.getenv("TMDB_API_KEY", tmdb_cfg.get("api_key", ""))
+                  self.tmdb = TMDb(api_key=api_key, language=tmdb_cfg.get("language", "en-US"))
+
+              # ---------- helpers ----------
+              def is_video(self, p: Path) -> bool:
+                  return p.suffix.lower() in self.s.exts
+
+              def _movie_plan(self, p: Path, info: dict):
+                  title = info.get("title") or info.get("movie_title") or p.stem
+                  year = info.get("year")
+                  meta = self.tmdb.search_movie(title, year)
+                  if meta:
+                      title = meta.get("title") or title
+                      try:
+                          year = int((meta.get("release_date") or "")[:4]) if meta.get("release_date") else year
+                      except Exception:
+                          pass
+                  rel = movie_path(self.s.pattern_movie, Ctx(title=title, year=year), p.suffix)
+                  return p, self.s.movie_dir / rel
+
+              def _episode_plan(self, p: Path, info: dict):
+                  series = info.get("series") or info.get("title") or "Unknown Series"
+                  season = info.get("season")
+                  episode = info.get("episode")
+                  absno = info.get("absolute")
+
+                  # If S/E available -> use TMDb for proper series name + episode title
+                  if season and episode:
+                      meta_show = self.tmdb.search_tv(series)
+                      ep_title = None
+                      series_name = series
+                      if meta_show:
+                          series_name = meta_show.get("name") or series
+                          try:
+                              seas = self.tmdb.season(meta_show["id"], int(season))
+                              for ep in (seas or {}).get("episodes", []) or []:
+                                  if int(ep.get("episode_number", -1)) == int(episode):
+                                      ep_title = ep.get("name")
+                                      break
+                          except Exception:
+                              pass
+                      rel = episode_path(self.s.pattern_episode,
+                                         Ctx(series=series_name, season=int(season), episode=int(episode), title=ep_title or ""),
+                                         p.suffix)
+                      return p, self.s.tv_dir / rel
+
+                  # Fall back: anime absolute (keep number, still organized)
+                  if absno:
+                      rel = anime_abs_path(self.s.pattern_anime_abs, Ctx(series=series, absolute=int(absno)), p.suffix)
+                      return p, self.s.tv_dir / rel
+
+                  # Last resort: put under series root with original filename
+                  return p, self.s.tv_dir / Path(series) / p.name
+
+              # ---------- planning API ----------
+              def plan_for(self, p: Path):
+                  info = parse_filename(p.name)
+                  if info.get("type") == "movie":
+                      return self._movie_plan(p, info)
+                  if info.get("type") == "episode":
+                      return self._episode_plan(p, info)
+                  # GuessIt sometimes misses types; try simple heuristic
+                  if any(k in info for k in ("season", "episode")):
+                      info["type"] = "episode"
+                      return self._episode_plan(p, info)
+                  return self._movie_plan(p, info)  # fallback treat as movie
+
+              def plan_batch(self, root: Path):
+                  out = []
+                  for f in Path(root).rglob("*"):
+                      if f.is_file() and self.is_video(f):
+                          pl = self.plan_for(f)
+                          if pl: out.append(pl)
+                  return out
+
+              def plan_list(self, files: Iterable[Path]):
+                  out = []
+                  for f in files:
+                      f = Path(f)
+                      if f.is_file() and self.is_video(f):
+                          pl = self.plan_for(f)
+                          if pl: out.append(pl)
+                  return out
+
+              def execute(self, plans: list[tuple[Path, Path]]):
+                  for src, dst in plans:
+                      dst.parent.mkdir(parents=True, exist_ok=True)
+                      if self.s.dry_run:
+                          print("[DRY] ", src, "->", dst)
+                      else:
+                          src.rename(dst)
+          PY
+
+          ############################
+          # GUI (instant scan + plan)
+          ############################
           cat > MiniFileBot/app_gui.py <<'PY'
           from PySide6.QtWidgets import *
           from pathlib import Path
@@ -87,9 +308,9 @@ jobs:
                   self.setWindowTitle("Mini FileBot — Rename")
                   self.resize(1200, 700)
                   self.cfg = load_cfg()
-                  self.engine: Engine | None = None
-                  self.roots: list[Path] = []
-                  self.plans: list[tuple[Path, Path]] = []
+                  self.engine = None
+                  self.roots = []
+                  self.plans = []
                   self._ui()
 
               def _ui(self):
@@ -97,7 +318,7 @@ jobs:
                   top = QHBoxLayout()
                   self.btn_add = QPushButton("Add Folder")
                   self.btn_add_files = QPushButton("Add Files")
-                  self.db = QComboBox(); self.db.addItems(["Auto", "TMDb", "TVDB", "AniList"])
+                  self.db = QComboBox(); self.db.addItems(["Auto","TMDb"])
                   self.btn_fetch = QPushButton("Fetch Data")
                   self.btn_match = QPushButton("Match")
                   self.btn_rename = QPushButton("Rename")
@@ -127,115 +348,116 @@ jobs:
 
               def _ensure_engine(self):
                   if not self.engine:
-                      self.cfg.setdefault("providers", {})["preference"] = self.db.currentText()
+                      self.cfg.setdefault("providers", {}).setdefault("tmdb", {})
                       save_cfg(self.cfg)
                       self.engine = Engine(self.cfg)
 
-              def _engine_is_video(self, p: Path) -> bool:
-                  if self.engine: return self.engine.is_video(p)
-                  return p.suffix.lower() in {".mkv",".mp4",".avi",".mov",".wmv",".m4v",".ts",".m2ts",".webm",".flv",".mk3d"}
+              def _is_video(self, p: Path) -> bool:
+                  return self.engine.is_video(p) if self.engine else (p.suffix.lower() in {".mkv",".mp4",".avi",".mov",".wmv",".m4v",".ts",".m2ts",".webm",".flv",".mk3d"})
 
-              def _list_videos_recursive(self, root: Path) -> list[Path]:
-                  files = []
-                  try:
-                      for dp, _, fns in os.walk(root):
-                          for fn in fns:
-                              fp = Path(dp) / fn
-                              if self._engine_is_video(fp) and "sample" not in fp.name.lower():
-                                  files.append(fp)
-                  except Exception as e:
-                      self.log.append(f"Scan error: {e}")
-                  return files
+              def _list_videos(self, root: Path):
+                  out = []
+                  for dp, _, fns in os.walk(root):
+                      for fn in fns:
+                          fp = Path(dp)/fn
+                          if self._is_video(fp) and "sample" not in fp.name.lower():
+                              out.append(fp)
+                  return out
 
-              def _show_on_left(self, paths):
-                  if not paths: return
-                  self.left.addItems([str(p) for p in paths]); self.left.repaint()
-
-              def _fill_left_from_plans(self):
-                  self.left.clear()
-                  if not self.plans:
-                      self.log.append("No planned items to show."); return
-                  self._show_on_left([src for (src, _) in self.plans])
-                  self.log.append(f"Listed {len(self.plans)} planned source file(s).")
+              def _show_left(self, items):
+                  if items:
+                      self.left.addItems([str(x) for x in items])
+                      self.left.repaint()
 
               def _on_add_folder(self):
                   d = QFileDialog.getExistingDirectory(self, "Choose folder to scan")
                   if not d: return
                   root = Path(d); self.roots.append(root)
-                  vids = self._list_videos_recursive(root)
-                  self._show_on_left(vids if vids else [root])
+                  vids = self._list_videos(root)
+                  self._show_left(vids if vids else [root])
                   self.log.append(f"Added folder: {root} (videos: {len(vids)})")
                   self._ensure_engine()
                   new_plans = self.engine.plan_batch(root)
                   self.plans.extend(new_plans)
-                  self.log.append(f"Planned {len(new_plans)} operations.")
+                  self.log.append(f"Planned {len(new_plans)} operation(s).")
 
               def _on_add_files(self):
                   files, _ = QFileDialog.getOpenFileNames(self, "Choose video files", "", "All files (*.*)")
                   if not files: return
-                  self._show_on_left(files)
+                  self._show_left(files)
                   self._ensure_engine()
                   new_plans = self.engine.plan_list([Path(f) for f in files])
                   self.plans.extend(new_plans)
                   self.log.append(f"Added {len(files)} files, planned: {len(new_plans)}")
 
               def _on_drop(self, paths):
-                  folders = [p for p in paths if p.is_dir()]
-                  files = [p for p in paths if p.is_file()]
-                  for f in folders:
-                      self.roots.append(f)
-                      vids = self._list_videos_recursive(f)
-                      self._show_on_left(vids if vids else [f])
-                      self.log.append(f"Dropped folder: {f} (videos: {len(vids)})")
+                  fs = [p for p in paths if p.is_file()]
+                  ds = [p for p in paths if p.is_dir()]
+                  for d in ds:
+                      self.roots.append(d)
+                      vids = self._list_videos(d)
+                      self._show_left(vids if vids else [d])
                       self._ensure_engine()
-                      new_plans = self.engine.plan_batch(f)
+                      new_plans = self.engine.plan_batch(d)
                       self.plans.extend(new_plans)
-                      self.log.append(f"Planned {len(new_plans)} for {f}.")
-                  if files:
-                      self._show_on_left(files)
+                      self.log.append(f"Dropped folder {d}, planned {len(new_plans)}")
+                  if fs:
+                      self._show_left(fs)
                       self._ensure_engine()
-                      new_plans = self.engine.plan_list(files)
+                      new_plans = self.engine.plan_list(fs)
                       self.plans.extend(new_plans)
-                      self.log.append(f"Dropped files: {len(files)}, planned: {len(new_plans)}")
+                      self.log.append(f"Dropped {len(fs)} files, planned {len(new_plans)}")
 
               def _on_fetch(self):
-                  if not self.roots:
-                      QMessageBox.information(self, "No folders", "Add a folder first."); return
+                  if not self.roots: 
+                      QMessageBox.information(self,"No folders","Add a folder first.")
+                      return
                   self._ensure_engine()
-                  self.plans = []; tot = len(self.roots)
+                  self.plans = []
+                  tot = len(self.roots)
                   for i, r in enumerate(self.roots, 1):
                       self.plans += self.engine.plan_batch(r)
-                      self.progress.setValue(int(i / tot * 100))
+                      self.progress.setValue(int(i/tot*100))
                   self.log.append(f"Fetched plans: {len(self.plans)}")
 
               def _on_match(self):
                   if not self.plans:
-                      QMessageBox.information(self, "Nothing to match", "Fetch Data first."); return
+                      QMessageBox.information(self,"Nothing to match","Fetch Data first.")
+                      return
                   self.right.clear()
-                  self.right.addItems([str(d) for _, d in self.plans])
+                  self.right.addItems([str(d) for _,d in self.plans])
                   self.right.repaint()
                   self.log.append("Matched — preview on the right.")
 
               def _on_rename(self):
                   if not self.plans:
-                      QMessageBox.information(self, "Nothing to rename", "Match first."); return
+                      QMessageBox.information(self,"Nothing to rename","Match first.")
+                      return
                   self._ensure_engine()
-                  if QMessageBox.question(self, "Confirm", "Apply rename/move now?") != QMessageBox.Yes: return
+                  if QMessageBox.question(self,"Confirm","Apply rename/move now?") != QMessageBox.Yes:
+                      return
                   try:
                       self.engine.execute(self.plans)
                       self.log.append("Rename complete.")
                   except Exception:
                       self.log.append(traceback.format_exc())
-                      QMessageBox.critical(self, "Rename Error", "See log.")
+                      QMessageBox.critical(self,"Rename Error","See log.")
+
+              def _fill_left_from_plans(self):
+                  self.left.clear()
+                  if not self.plans: 
+                      self.log.append("No plans.")
+                      return
+                  self._show_left([s for s,_ in self.plans])
 
               def _on_debug(self):
                   if not self.roots:
-                      QMessageBox.information(self, "No folders", "Add a folder first."); return
-                  total = 0
+                      QMessageBox.information(self,"No folders","Add a folder first.")
+                      return
+                  total=0
                   for r in self.roots:
-                      vids = self._list_videos_recursive(r)
-                      total += len(vids)
-                      self.log.append(f"[debug] {r} -> videos: {len(vids)}")
+                      vids=self._list_videos(r); total+=len(vids)
+                      self.log.append(f"[debug] {r} -> {len(vids)}")
                   self.log.append(f"[debug] total videos: {total}")
 
           if __name__ == "__main__":
@@ -244,21 +466,37 @@ jobs:
               sys.exit(app.exec())
           PY
 
-          # config shipped next to EXE
+          ############################
+          # config.yaml
+          ############################
           cat > MiniFileBot/config.yaml <<'YAML'
-          providers: { preference: "Auto" }
+          paths:
+            movie_dir: ./Movies
+            tv_dir: ./TV
+          providers:
+            tmdb:
+              api_key: ""    # optional; or set env var TMDB_API_KEY
+              language: "en-US"
+          behavior:
+            action: move       # move | copy | (rename in place if same dir)
+            dry_run: true
           video_exts: [".mkv",".mp4",".avi",".mov",".wmv",".m4v",".ts",".m2ts",".webm",".flv",".mk3d"]
+          patterns:
+            movie: "{title} ({year})/{title} ({year})"
+            episode: "{series}/Season {season:02}/{series} - S{season:02}E{episode:02} - {title}"
+            anime_absolute: "{series}/{series} - {absolute:03}"
           YAML
 
-          # WiX authoring (packages the EXE + config.yaml)
+          ############################
+          # WiX authoring
+          ############################
           cat > installer/MiniFileBot.wxs <<'WXS'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-            <Product Id="*" Name="MiniFileBot" Language="1033" Version="1.0.0" Manufacturer="MiniFileBot" UpgradeCode="1EED4C90-9B6C-4F5D-96C6-7C3C6C5DE001">
+            <Product Id="*" Name="MiniFileBot" Language="1033" Version="1.0.0" Manufacturer="MiniFileBot" UpgradeCode="A4E6F40E-8BB0-4410-9C91-6B8B0A9D21E0">
               <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
               <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
               <MajorUpgrade AllowDowngrades="no" DowngradeErrorMessage="A newer version of MiniFileBot is already installed." />
-
               <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
               <UIRef Id="WixUI_InstallDir" />
               <UIRef Id="WixUI_ErrorProgressText" />
@@ -274,7 +512,7 @@ jobs:
                 <Component Id="ShortcutCmp" Guid="*">
                   <Shortcut Id="StartMenuShortcut" Name="MiniFileBot" Target="[INSTALLFOLDER]MiniFileBot.exe" WorkingDirectory="INSTALLFOLDER" />
                   <RemoveFolder Id="RemovePMF" Directory="ProgramMenuFolder" On="uninstall" />
-                  <RegistryValue Root="HKCU" Key="Software\MiniFileBot" Name="Installed" Type="integer" Value="1" KeyPath="yes"/>
+                  <RegistryValue Root="HKCU" Key="Software\\MiniFileBot" Name="Installed" Type="integer" Value="1" KeyPath="yes"/>
                 </Component>
               </DirectoryRef>
 
@@ -285,10 +523,10 @@ jobs:
 
               <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
                 <Component Id="ExeCmp" Guid="*">
-                  <File Id="AppExe" Source="$(var.BuildOut)\MiniFileBot.exe" KeyPath="yes" />
+                  <File Id="AppExe" Source="$(var.BuildOut)\\MiniFileBot.exe" KeyPath="yes" />
                 </Component>
                 <Component Id="CfgCmp" Guid="*">
-                  <File Id="CfgFile" Source="$(var.BuildOut)\config.yaml" />
+                  <File Id="Cfg" Source="$(var.BuildOut)\\config.yaml" />
                 </Component>
               </ComponentGroup>
             </Product>
@@ -320,6 +558,7 @@ jobs:
             dist/MiniFileBot-Setup.msi
             dist/MiniFileBot.exe
             dist/config.yaml
+
 
 
 
