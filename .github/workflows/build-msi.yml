@@ -1,4 +1,4 @@
-name: Build MSI (WiX)
+name: Build MiniFileBot MSI (WiX)
 
 on:
   workflow_dispatch: {}
@@ -11,15 +11,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pyyaml PySide6 requests
+          pip install pyinstaller PySide6 pyyaml requests
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          choco install wixtoolset --yes --no-progress
 
       - name: Add WiX to PATH
         shell: pwsh
@@ -28,23 +33,24 @@ jobs:
           if (-not $wix) { Write-Error 'WiX bin folder not found.'; exit 1 }
           $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      - name: Prepare sources
+      - name: Prepare sources (GUI + minimal engine + WiX .wxs)
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p MiniFileBot
+          mkdir -p MiniFileBot installer
 
-          # --- minimal engine placeholder (replace with your real engine if present) ---
+          # --- Minimal engine placeholder (use your real engine if you already have one) ---
           cat > MiniFileBot/engine.py <<'PY'
           class Engine:
               def __init__(self, cfg=None): pass
-              def is_video(self, p): return str(p).lower().endswith((".mp4",".mkv",".avi",".mov",".webm",".m4v",".ts",".m2ts",".flv",".wmv",".mk3d"))
+              def is_video(self, p):
+                  return str(p).lower().endswith((".mkv",".mp4",".avi",".mov",".wmv",".m4v",".ts",".m2ts",".webm",".flv",".mk3d"))
               def plan_batch(self, root): return []
               def plan_list(self, files): return []
               def execute(self, plans): pass
           PY
 
-          # --- GUI with recursive scan + instant planning ---
+          # --- GUI: recursive scan + instant planning (left lists files immediately) ---
           cat > MiniFileBot/app_gui.py <<'PY'
           from PySide6.QtWidgets import *
           from pathlib import Path
@@ -102,12 +108,15 @@ jobs:
                   top.addWidget(QLabel("Database:")); top.addWidget(self.db)
                   for w in (self.btn_fetch, self.btn_match, self.btn_rename, self.btn_debug, self.btn_show): top.addWidget(w)
                   v.addLayout(top)
+
                   cols = QHBoxLayout()
                   self.left = DropList(self._on_drop); cols.addWidget(self.left, 4); cols.addWidget(QLabel("→"))
                   self.right = QListWidget(); self.right.setStyleSheet("color:black;"); cols.addWidget(self.right, 5)
                   v.addLayout(cols)
+
                   self.progress = QProgressBar(); v.addWidget(self.progress)
                   self.log = QTextEdit(); self.log.setReadOnly(True); v.addWidget(self.log)
+
                   self.btn_add.clicked.connect(self._on_add_folder)
                   self.btn_add_files.clicked.connect(self._on_add_files)
                   self.btn_fetch.clicked.connect(self._on_fetch)
@@ -235,25 +244,82 @@ jobs:
               sys.exit(app.exec())
           PY
 
-          # simple config file placed next to EXE
+          # config shipped next to EXE
           cat > MiniFileBot/config.yaml <<'YAML'
-          video_exts: [".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm", ".flv", ".mk3d"]
           providers: { preference: "Auto" }
+          video_exts: [".mkv",".mp4",".avi",".mov",".wmv",".m4v",".ts",".m2ts",".webm",".flv",".mk3d"]
           YAML
 
-      - name: Build EXE
+          # WiX authoring (packages the EXE + config.yaml)
+          cat > installer/MiniFileBot.wxs <<'WXS'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+            <Product Id="*" Name="MiniFileBot" Language="1033" Version="1.0.0" Manufacturer="MiniFileBot" UpgradeCode="1EED4C90-9B6C-4F5D-96C6-7C3C6C5DE001">
+              <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+              <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+              <MajorUpgrade AllowDowngrades="no" DowngradeErrorMessage="A newer version of MiniFileBot is already installed." />
+
+              <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+              <UIRef Id="WixUI_InstallDir" />
+              <UIRef Id="WixUI_ErrorProgressText" />
+
+              <Directory Id="TARGETDIR" Name="SourceDir">
+                <Directory Id="ProgramFilesFolder">
+                  <Directory Id="INSTALLFOLDER" Name="MiniFileBot" />
+                </Directory>
+                <Directory Id="ProgramMenuFolder" />
+              </Directory>
+
+              <DirectoryRef Id="ProgramMenuFolder">
+                <Component Id="ShortcutCmp" Guid="*">
+                  <Shortcut Id="StartMenuShortcut" Name="MiniFileBot" Target="[INSTALLFOLDER]MiniFileBot.exe" WorkingDirectory="INSTALLFOLDER" />
+                  <RemoveFolder Id="RemovePMF" Directory="ProgramMenuFolder" On="uninstall" />
+                  <RegistryValue Root="HKCU" Key="Software\MiniFileBot" Name="Installed" Type="integer" Value="1" KeyPath="yes"/>
+                </Component>
+              </DirectoryRef>
+
+              <Feature Id="MainFeature" Title="MiniFileBot" Level="1">
+                <ComponentGroupRef Id="AppFiles" />
+                <ComponentRef Id="ShortcutCmp" />
+              </Feature>
+
+              <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+                <Component Id="ExeCmp" Guid="*">
+                  <File Id="AppExe" Source="$(var.BuildOut)\MiniFileBot.exe" KeyPath="yes" />
+                </Component>
+                <Component Id="CfgCmp" Guid="*">
+                  <File Id="CfgFile" Source="$(var.BuildOut)\config.yaml" />
+                </Component>
+              </ComponentGroup>
+            </Product>
+          </Wix>
+          WXS
+
+      - name: Build EXE (PyInstaller)
+        shell: cmd
         run: |
-          pyinstaller --noconfirm --windowed --onefile MiniFileBot/app_gui.py -n MiniFileBot
+          pyinstaller --noconfirm --windowed --onefile MiniFileBot\app_gui.py -n MiniFileBot
+          if not exist dist\MiniFileBot.exe exit /b 1
           copy MiniFileBot\config.yaml dist\config.yaml
 
-      # If you also build an MSI, keep your WiX steps here…
+      - name: Build MSI (WiX)
+        shell: cmd
+        working-directory: installer
+        run: |
+          set BuildOut=%CD%\..\dist
+          candle.exe -dBuildOut="%BuildOut%" MiniFileBot.wxs -ext WixUIExtension -o MiniFileBot.wixobj
+          if errorlevel 1 exit /b 1
+          light.exe MiniFileBot.wixobj -ext WixUIExtension -o "..\dist\MiniFileBot-Setup.msi"
+          if errorlevel 1 exit /b 1
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MiniFileBot-dist
+          name: MiniFileBot-MSI
           path: |
-            dist/**
+            dist/MiniFileBot-Setup.msi
+            dist/MiniFileBot.exe
+            dist/config.yaml
 
 
 
