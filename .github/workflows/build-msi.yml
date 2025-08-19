@@ -524,11 +524,13 @@ public partial class MainWindow : Window
 name: build-msi
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build:
@@ -540,7 +542,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: 8.0.x
 
       - name: Restore & Build (Release)
         shell: pwsh
@@ -555,6 +557,7 @@ jobs:
       - name: Build MSI (WiX)
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force obj | Out-Null
           $wix = 'C:\Program Files (x86)\WiX Toolset v3.11\bin'
           & "$wix\candle.exe" "src\TvRenamer.Installer\Product.wxs" -o "obj\product.wixobj"
           & "$wix\light.exe"  "obj\product.wixobj" -o "TVRenamer.msi" -ext WixUIExtension
@@ -599,6 +602,7 @@ Push to `main` → workflow builds and uploads `TVRenamer.msi` under CI artifact
 ## Notes
 - TVDB token is acquired at runtime via `/v4/login` using your API key (and optional PIN).
 - If TVDB rate-limits or is unavailable, switch the Provider dropdown to **TVMaze**.
+
 
 
 
