@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # ----- Version to stamp into MSI (MSI requires 3-part version) -----
+      # ----- Version to stamp into MSI (MSI needs 3-part version) -----
       - name: Compute product version
         shell: pwsh
         run: |
@@ -32,7 +32,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller PySide6 pyyaml requests guessit babelfish rebulk
 
-      # ======= Install/upgrade WiX Toolset (idempotent) =======
+      # ----- WiX Toolset -----
       - name: Ensure WiX Toolset
         shell: pwsh
         run: |
@@ -349,7 +349,7 @@ jobs:
             anime_absolute: "{series}/{series} - {absolute:03}"
           YAML
 
-          # WiX authoring (per-user + HKCU KeyPath to satisfy ICE38/ICE43/ICE57)
+          # WiX authoring (per-user; files in LocalAppData; Start Menu component HKCU KeyPath)
           cat > installer/MiniFileBot.wxs <<'WXS'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -363,7 +363,7 @@ jobs:
               <UIRef Id="WixUI_InstallDir" />
               <UIRef Id="WixUI_ErrorProgressText" />
               <Directory Id="TARGETDIR" Name="SourceDir">
-                <Directory Id="ProgramFilesFolder">
+                <Directory Id="LocalAppDataFolder">
                   <Directory Id="INSTALLFOLDER" Name="MiniFileBot" />
                 </Directory>
                 <Directory Id="ProgramMenuFolder" />
@@ -427,9 +427,6 @@ jobs:
             dist/MiniFileBot-${{ env.PRODUCT_VERSION }}-Setup.msi
             dist/MiniFileBot.exe
             dist/config.yaml
-
-
-
 
 
 
