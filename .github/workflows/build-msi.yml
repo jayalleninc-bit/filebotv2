@@ -349,7 +349,7 @@ jobs:
             anime_absolute: "{series}/{series} - {absolute:03}"
           YAML
 
-          # WiX authoring (per-user; files in LocalAppData; Start Menu component HKCU KeyPath)
+          # WiX authoring (per-user; files in LocalAppData; HKCU KeyPaths; cleanup component)
           cat > installer/MiniFileBot.wxs <<'WXS'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -362,37 +362,49 @@ jobs:
               <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
               <UIRef Id="WixUI_InstallDir" />
               <UIRef Id="WixUI_ErrorProgressText" />
+
               <Directory Id="TARGETDIR" Name="SourceDir">
                 <Directory Id="LocalAppDataFolder">
-                  <Directory Id="INSTALLFOLDER" Name="MiniFileBot" />
+                  <Directory Id="INSTALLFOLDER" Name="MiniFileBot">
+                    <!-- Cleanup for per-user root -->
+                    <Component Id="CleanupFolder" Guid="*">
+                      <RemoveFile Id="RemoveInstallDir" Name="*" On="uninstall" Directory="INSTALLFOLDER" />
+                      <RegistryValue Root="HKCU" Key="Software\\MiniFileBot\\Cleanup"
+                                     Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+                    </Component>
+                  </Directory>
                 </Directory>
                 <Directory Id="ProgramMenuFolder" />
               </Directory>
+
               <DirectoryRef Id="ProgramMenuFolder">
                 <Component Id="ProgramMenuShortcuts" Guid="*">
                   <Shortcut Id="StartMenuShortcut" Name="MiniFileBot"
                             Target="[INSTALLFOLDER]MiniFileBot.exe"
                             WorkingDirectory="INSTALLFOLDER" />
                   <RemoveFolder Id="RemovePMF" Directory="ProgramMenuFolder" On="uninstall" />
-                  <RegistryValue Root="HKCU"
-                                 Key="Software\\MiniFileBot"
-                                 Name="Installed"
-                                 Type="integer"
-                                 Value="1"
-                                 KeyPath="yes" />
+                  <RegistryValue Root="HKCU" Key="Software\\MiniFileBot"
+                                 Name="Shortcut" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
               </DirectoryRef>
+
               <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
                 <Component Id="ExeCmp" Guid="*">
-                  <File Id="AppExe" Source="$(var.BuildOut)\MiniFileBot.exe" KeyPath="yes" />
+                  <File Id="AppExe" Source="$(var.BuildOut)\\MiniFileBot.exe" />
+                  <RegistryValue Root="HKCU" Key="Software\\MiniFileBot\\Exe"
+                                 Name="Installed" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
                 <Component Id="CfgCmp" Guid="*">
-                  <File Id="Cfg" Source="$(var.BuildOut)\config.yaml" />
+                  <File Id="Cfg" Source="$(var.BuildOut)\\config.yaml" />
+                  <RegistryValue Root="HKCU" Key="Software\\MiniFileBot\\Cfg"
+                                 Name="Installed" Type="integer" Value="1" KeyPath="yes" />
                 </Component>
               </ComponentGroup>
+
               <Feature Id="MainFeature" Title="MiniFileBot" Level="1">
                 <ComponentGroupRef Id="AppFiles" />
                 <ComponentRef Id="ProgramMenuShortcuts" />
+                <ComponentRef Id="CleanupFolder" />
               </Feature>
             </Product>
           </Wix>
