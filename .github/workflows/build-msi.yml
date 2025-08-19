@@ -49,12 +49,13 @@ jobs:
           if (-not $wix) { Write-Error 'WiX bin folder not found.'; exit 1 }
           $wix.FullName | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      # ----- If your sources are already in the repo, remove this block -----
+      # ----- Prepare sources (engine + GUI + WiX) -----
       - name: Prepare sources (engine + GUI + WiX)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p MiniFileBot engine installer
+
           # TMDb client
           cat > engine/tmdb.py <<'PY'
           import requests
@@ -86,6 +87,7 @@ jobs:
               def season(self, tv_id: int, season_num: int):
                   return self._get(f"/tv/{tv_id}/season/{season_num}")
           PY
+
           # Parsing helpers (GuessIt + anime absolute)
           cat > engine/parsers.py <<'PY'
           from guessit import guessit
@@ -100,6 +102,7 @@ jobs:
                   info["anime"] = True
               return info
           PY
+
           # Renamer helpers
           cat > engine/renamer.py <<'PY'
           from dataclasses import dataclass
@@ -123,6 +126,7 @@ jobs:
           def anime_abs_path(pattern: str, c: Ctx, ext: str) -> Path:
               return Path(pattern.format(series=sanitize(c.series), absolute=int(c.absolute or 0))).with_suffix(ext)
           PY
+
           # Core engine (TMDb-backed)
           cat > engine/__init__.py <<'PY'
           from dataclasses import dataclass
@@ -229,6 +233,7 @@ jobs:
                       if self.s.dry_run: print("[DRY]", src, "->", dst)
                       else: src.rename(dst)
           PY
+
           # GUI
           cat > MiniFileBot/app_gui.py <<'PY'
           from PySide6.QtWidgets import *
@@ -331,6 +336,7 @@ jobs:
           if __name__ == "__main__":
               app=QApplication(sys.argv); w=App(); w.show(); sys.exit(app.exec())
           PY
+
           # Config shipped with MSI
           cat > MiniFileBot/config.yaml <<'YAML'
           paths: { movie_dir: ./Movies, tv_dir: ./TV }
@@ -342,13 +348,14 @@ jobs:
             episode: "{series}/Season {season:02}/{series} - S{season:02}E{episode:02} - {title}"
             anime_absolute: "{series}/{series} - {absolute:03}"
           YAML
-          # WiX authoring (HKLM KeyPath to avoid ICE03)
+
+          # WiX authoring (per-user + HKCU KeyPath to satisfy ICE38/ICE43/ICE57)
           cat > installer/MiniFileBot.wxs <<'WXS'
           <?xml version="1.0" encoding="UTF-8"?>
           <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
             <Product Id="*" Name="MiniFileBot" Language="1033" Version="$(var.ProductVersion)"
                      Manufacturer="MiniFileBot" UpgradeCode="A4E6F40E-8BB0-4410-9C91-6B8B0A9D21E0">
-              <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+              <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
               <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
               <MajorUpgrade AllowDowngrades="no"
                             DowngradeErrorMessage="A newer version of MiniFileBot is already installed." />
@@ -367,8 +374,7 @@ jobs:
                             Target="[INSTALLFOLDER]MiniFileBot.exe"
                             WorkingDirectory="INSTALLFOLDER" />
                   <RemoveFolder Id="RemovePMF" Directory="ProgramMenuFolder" On="uninstall" />
-                  <!-- FIXED: use HKLM + simple key + integer -->
-                  <RegistryValue Root="HKLM"
+                  <RegistryValue Root="HKCU"
                                  Key="Software\\MiniFileBot"
                                  Name="Installed"
                                  Type="integer"
@@ -421,9 +427,6 @@ jobs:
             dist/MiniFileBot-${{ env.PRODUCT_VERSION }}-Setup.msi
             dist/MiniFileBot.exe
             dist/config.yaml
-
-
-
 
 
 
