@@ -523,14 +523,7 @@ public partial class MainWindow : Window
 ```yaml
 name: build-msi
 
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+on: [push, pull_request, workflow_dispatch]
 
 jobs:
   build:
@@ -602,7 +595,4 @@ Push to `main` → workflow builds and uploads `TVRenamer.msi` under CI artifact
 ## Notes
 - TVDB token is acquired at runtime via `/v4/login` using your API key (and optional PIN).
 - If TVDB rate-limits or is unavailable, switch the Provider dropdown to **TVMaze**.
-
-
-
 
