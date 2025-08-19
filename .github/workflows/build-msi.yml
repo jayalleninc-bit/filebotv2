@@ -4,97 +4,48 @@ on:
   workflow_dispatch: {}
   push:
     branches: [ "main" ]
-    tags:
-      - "v*"
 
 jobs:
   build-msi:
     runs-on: windows-latest
 
-    env:
-      # Stamp a 3-part MSI version (MSI requires x.y.z)
-      PRODUCT_VERSION: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.ref_name != '' && join(fromJSON('[""]'), '') || format('0.1.{0}', github.run_number) }}
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
-      - name: Set product version (prefer tag like v1.2.3, else 0.1.RUNNUMBER)
-        id: ver
-        shell: pwsh
-        run: |
-          $ver = ""
-          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}".StartsWith("v")) {
-            $ver = "${{ github.ref_name }}".TrimStart("v")
-          } else {
-            $ver = "0.1.${{ github.run_number }}"
-          }
-          "PRODUCT_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Using PRODUCT_VERSION=$ver"
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
-      - name: Install Python deps
+      - name: Install dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build EXE (PyInstaller)
+      - name: Build EXE
         shell: pwsh
         run: |
-          pyinstaller app/main.py `
-            --name MiniTVRenamer `
-            --noconfirm `
-            --windowed `
-            --onefile `
-            --icon app/icon.ico
+          pyinstaller app/main.py --name MiniTVRenamer --noconfirm --windowed --onefile --icon app/icon.ico
 
       - name: Install WiX Toolset
         shell: pwsh
         run: |
           choco install wixtoolset -y
-          # add WiX bin to PATH for this job
           echo "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      - name: Harvest dist and compile/link MSI
+      - name: Build MSI
         shell: pwsh
         run: |
-          # Ensure wix folder exists
-          if (-not (Test-Path "wix")) { New-Item -ItemType Directory -Path wix | Out-Null }
-
-          # Heat harvest of built files
-          heat dir dist `
-            -gg -sreg -sfrag -srd `
-            -dr INSTALLFOLDER `
-            -cg AppComponents `
-            -out wix\HarvestedFiles.wxs
-
-          # If your Product.wxs has a fixed Version, patch it with PRODUCT_VERSION
-          (Get-Content wix\Product.wxs) `
-            -replace 'Version="[^"]+"', ('Version="' + $env:PRODUCT_VERSION + '"') `
-            | Set-Content wix\Product.wxs
-
-          # Compile
+          heat dir dist -gg -sreg -sfrag -srd -dr INSTALLFOLDER -cg AppComponents -out wix\HarvestedFiles.wxs
           candle wix\Product.wxs wix\HarvestedFiles.wxs -out wix\
-
-          # Link
-          light wix\Product.wixobj wix\HarvestedFiles.wixobj `
-            -ext WixUIExtension `
-            -cultures:en-us `
-            -out MiniTVRenamer-${{ env.PRODUCT_VERSION }}.msi
+          light wix\Product.wixobj wix\HarvestedFiles.wixobj -ext WixUIExtension -cultures:en-us -out MiniTVRenamer.msi
 
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MiniTVRenamer-MSI-${{ env.PRODUCT_VERSION }}
-          path: MiniTVRenamer-${{ env.PRODUCT_VERSION }}.msi
-
-
-
+          name: MiniTVRenamer-Installer
+          path: MiniTVRenamer.msi
 
