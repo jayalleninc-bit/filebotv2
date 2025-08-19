@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="$(var.ProductName)"
+    Language="1033"
+    Version="$(var.ProductVersion)"
+    Manufacturer="$(var.Manufacturer)"
+    UpgradeCode="9E2C0A08-8D1D-4A0B-9C4C-7D6F1B9C2E3F">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of $(var.ProductName) is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="MainFeature" Title="$(var.ProductName)" Level="1">
+      <ComponentGroupRef Id="AppComponents"/>
+      <ComponentGroupRef Id="CliComponents"/>
+      <ComponentRef Id="StartMenuShortcut"/>
+    </Feature>
+
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <UIRef Id="WixUI_InstallDir" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="CompanyFolder" Name="$(var.Manufacturer)">
+          <Directory Id="INSTALLFOLDER" Name="$(var.ProductName)" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="$(var.ProductName)" />
+      </Directory>
+    </Directory>
+
+    <Component Id="StartMenuShortcut" Guid="*">
+      <Shortcut Id="AppShortcut"
+                Directory="ApplicationProgramsFolder"
+                Name="$(var.ProductName)"
+                Target="[INSTALLFOLDER]$(var.MainExe)"
+                WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveShortcutDir" Directory="ApplicationProgramsFolder" On="uninstall"/>
+      <RegistryValue Root="HKCU" Key="Software\$(var.Manufacturer)\$(var.ProductName)" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+    </Component>
+  </Product>
+</Wix>
