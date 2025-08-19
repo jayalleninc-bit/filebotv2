@@ -523,7 +523,14 @@ public partial class MainWindow : Window
 ```yaml
 name: build-msi
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build:
@@ -595,4 +602,37 @@ Push to `main` → workflow builds and uploads `TVRenamer.msi` under CI artifact
 ## Notes
 - TVDB token is acquired at runtime via `/v4/login` using your API key (and optional PIN).
 - If TVDB rate-limits or is unavailable, switch the Provider dropdown to **TVMaze**.
+
+
+---
+
+## .github/workflows/zz-test.yml (new minimal workflow)
+```yaml
+name: zz-test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "workflow parsed OK"
+```
+
+---
+
+## PowerShell one-liner to strip tabs/BOM/NBSP from any YAML in .github/workflows
+```powershell
+Get-ChildItem .github/workflows -Filter *.yml | ForEach-Object {
+  ($content = Get-Content $_.FullName -Raw) `
+    -replace "`t", '  ' `
+    -replace [char]0xFEFF, '' `
+    -replace [char]0xA0, ' ' | Set-Content $_.FullName -NoNewline
+}
+```
 
