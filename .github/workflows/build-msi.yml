@@ -525,10 +525,10 @@ name: build-msi
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ main ]
-  workflow_dispatch: {}
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -543,20 +543,21 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Restore & Build (Release)
+        shell: pwsh
         run: |
           dotnet restore ./src/TvRenamer.App/TvRenamer.App.csproj
-          dotnet build ./src/TvRenamer.App/TvRenamer.App.csproj -c Release
+          dotnet build ./src/TvRenamer.App/TvRenamer.App.csproj -c Release --no-restore
 
       - name: Install WiX Toolset (v3.11)
-        run: choco install wixtoolset --yes
+        shell: pwsh
+        run: choco install wixtoolset --yes --no-progress
 
       - name: Build MSI (WiX)
-        env:
-          WixToolPath: 'C:\\Program Files (x86)\\WiX Toolset v3.11\\bin'
+        shell: pwsh
         run: |
-          setx WixToolPath "$env:WixToolPath"
-          & "$env:WixToolPath\\candle.exe" src\\TvRenamer.Installer\\Product.wxs -o obj\\product.wixobj
-          & "$env:WixToolPath\\light.exe" obj\\product.wixobj -o TVRenamer.msi -ext WixUIExtension
+          $wix = 'C:\Program Files (x86)\WiX Toolset v3.11\bin'
+          & "$wix\candle.exe" "src\TvRenamer.Installer\Product.wxs" -o "obj\product.wixobj"
+          & "$wix\light.exe"  "obj\product.wixobj" -o "TVRenamer.msi" -ext WixUIExtension
 
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
@@ -598,5 +599,6 @@ Push to `main` → workflow builds and uploads `TVRenamer.msi` under CI artifact
 ## Notes
 - TVDB token is acquired at runtime via `/v4/login` using your API key (and optional PIN).
 - If TVDB rate-limits or is unavailable, switch the Provider dropdown to **TVMaze**.
+
 
 
