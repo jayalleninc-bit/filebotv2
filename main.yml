@@ -1,0 +1,182 @@
+name: Build MSI (MediaRanger)
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  # Optional code signing secrets (set these in repo Settings > Secrets and variables > Actions)
+  WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}   # base64-encoded PFX
+  WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+  # Solution info (adjust if your paths differ)
+  WPF_CSProj: src/MediaRanger.Wpf/MediaRanger.Wpf.csproj
+  CLI_CSProj: src/MediaRanger.Cli/MediaRanger.Cli.csproj
+  WIX_WXS: tools/wix/Product.wxs
+  PRODUCT_NAME: MediaRanger
+  MANUFACTURER: MediaRanger
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8.x
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/global.json', '**/NuGet.Config') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Install WiX Toolset v3.11
+        run: |
+          choco install wixtoolset --version=3.11.2 -y
+          $wixBin = "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          if (-not (Test-Path "$wixBin\candle.exe")) {
+            Write-Error "WiX candle.exe not found at $wixBin"
+          }
+          echo "WIXBIN=$wixBin" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Set version
+        id: setver
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $v = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $sha = "${{ github.sha }}".Substring(0,7)
+            $v = "0.0.0-$sha"
+          }
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "Computed version: $v"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build (Release)
+        run: dotnet build -c Release --no-restore
+
+      - name: Run tests
+        run: dotnet test -c Release --no-build --verbosity normal
+
+      - name: Publish apps (WPF + CLI)
+        run: |
+          New-Item -ItemType Directory -Path out/wpf -Force | Out-Null
+          New-Item -ItemType Directory -Path out/cli -Force | Out-Null
+
+          dotnet publish "$env:WPF_CSProj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false -o "$PWD/out/wpf"
+          dotnet publish "$env:CLI_CSProj" -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false -o "$PWD/out/cli"
+
+          Get-ChildItem out -Recurse
+
+      - name: (Optional) Sign binaries before MSI
+        if: ${{ env.WINDOWS_CERT_BASE64 != '' && env.WINDOWS_CERT_PASSWORD != '' }}
+        run: |
+          $pfxPath = "$env:RUNNER_TEMP\codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+
+          # signtool is available via Windows SDK on the hosted runner
+          $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
+          if (-not (Test-Path $signtool)) {
+            $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+          }
+          if (-not (Test-Path $signtool)) {
+            Write-Error "signtool.exe not found."
+          }
+
+          $filesToSign = @()
+          $filesToSign += Get-ChildItem out/wpf -Recurse -Include *.exe,*.dll | Select-Object -ExpandProperty FullName
+          $filesToSign += Get-ChildItem out/cli -Recurse -Include *.exe,*.dll | Select-Object -ExpandProperty FullName
+
+          if ($filesToSign.Count -gt 0) {
+            & $signtool sign /f $pfxPath /p "$env:WINDOWS_CERT_PASSWORD" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $filesToSign
+          } else {
+            "No binaries found to sign (skipping)."
+          }
+
+      - name: Compile MSI with WiX (candle)
+        run: |
+          New-Item -ItemType Directory -Path wix -Force | Out-Null
+          & "$env:WIXBIN\candle.exe" `
+            -dWpfDir="$PWD\out\wpf" `
+            -dCliDir="$PWD\out\cli" `
+            -dProductName="$env:PRODUCT_NAME" `
+            -dManufacturer="$env:MANUFACTURER" `
+            -dAppVersion="$env:APP_VERSION" `
+            -out "wix\Product.wixobj" `
+            "$env:WIX_WXS"
+
+      - name: Link MSI with WiX (light)
+        run: |
+          New-Item -ItemType Directory -Path out/msi -Force | Out-Null
+          & "$env:WIXBIN\light.exe" `
+            -ext WixUIExtension `
+            -cultures:en-us `
+            -out "out/msi/$env:PRODUCT_NAME-$env:APP_VERSION.msi" `
+            "wix\Product.wixobj"
+
+      - name: (Optional) Sign MSI
+        if: ${{ env.WINDOWS_CERT_BASE64 != '' && env:WINDOWS_CERT_PASSWORD != '' }}
+        run: |
+          $pfxPath = "$env:RUNNER_TEMP\codesign.pfx"
+          $msi = Get-ChildItem "out/msi/*.msi" | Select-Object -ExpandProperty FullName
+          if (-not $msi) { Write-Error "MSI not found." }
+
+          $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
+          if (-not (Test-Path $signtool)) {
+            $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+          }
+          if (-not (Test-Path $signtool)) {
+            Write-Error "signtool.exe not found."
+          }
+
+          & $signtool sign /f $pfxPath /p "$env:WINDOWS_CERT_PASSWORD" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "$msi"
+
+      - name: Create checksums
+        run: |
+          $msi = Get-ChildItem "out/msi/*.msi" | Select-Object -ExpandProperty FullName
+          $hash = Get-FileHash -Path $msi -Algorithm SHA256
+          $out = "$($msi).sha256"
+          "$($hash.Hash)  $(Split-Path -Leaf $msi)" | Out-File -FilePath $out -Encoding ASCII
+          Write-Host "Checksum written to $out"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-and-logs
+          path: |
+            out/msi/*.msi
+            out/msi/*.sha256
+            wix/*.wixobj
+            **/bin/**/Serilog*.log
+            **/TestResults/*.trx
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ env.PRODUCT_NAME }} v${{ env.APP_VERSION }}"
+          draft: false
+          prerelease: false
+          files: |
+            out/msi/*.msi
+            out/msi/*.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
